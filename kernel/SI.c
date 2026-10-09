@@ -31,8 +31,13 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define REAL_SI_STATUS	(REAL_SI_BASE+0x38)
 #define REAL_SI_IO_BUF	(REAL_SI_BASE+0x80)
 
+/* Real type of the GBA link port, returned by our SIGetType (SIGetType.S) */
+#define GBA_LINK_TYPE	0x130031C0
+
 /* ~5ms, a GBA transfer takes well under 1ms */
 #define GBA_LINK_TIMEOUT	9500
+/* ~50ms without traffic on the GBA port before the kernel probes it */
+#define GBA_LINK_PROBE	94921
 
 extern vu32 TRIGame;
 
@@ -42,6 +47,7 @@ static u32 cur_control = 0;
 /* GBA link passthrough: game port and real SI channel, GBALinkPort -1 = off */
 static s32 GBALinkPort = -1;
 static u32 GBALinkPhys = 0;
+static u32 GBALinkLastTransfer = 0;
 void SIInit()
 {
 	memset((void*)SI_BASE, 0, 0x120);
@@ -57,6 +63,9 @@ void SIInit()
 
 	GBALinkPort = ConfigGetGBALinkPort();
 	GBALinkPhys = ConfigGetGBALinkPhys();
+	GBALinkLastTransfer = read32(HW_TIMER);
+	write32(GBA_LINK_TYPE, SI_ERROR_NO_RESPONSE);
+	sync_after_write((void*)GBA_LINK_TYPE, 0x20);
 	if (GBALinkPort >= 0)
 		dbgprintf("SI:GBA link on port %d, real channel %d\r\n", GBALinkPort + 1, GBALinkPhys);
 }
@@ -69,6 +78,63 @@ static void SIWaitRealTransfer(void)
 }
 
 /*
+ * Run one transfer on the real SI channel the GBA is wired to.
+ * The output must already be in the real IO buffer, the input is left there.
+ * Returns the channel's error bits, sets *comerr like COMCSR.COMERR.
+ */
+static u32 SIGBARealTransfer(u32 outlen, u32 inlen, bool *comerr)
+{
+	/* Clear the channel's error bits, then start the transfer.
+	   Keep RDSTINTMSK as-is and leave TCINTMSK off so the PPC never
+	   sees an interrupt from the real hardware. */
+	write32(REAL_SI_STATUS, 0x0F000000 >> (8 * GBALinkPhys));
+	u32 real = read32(REAL_SI_CONTROL) & (1 << 27);
+	write32(REAL_SI_CONTROL, real | (1 << 31) | ((outlen & 0x7F) << 16) | ((inlen & 0x7F) << 8) | (GBALinkPhys << 1) | 1);
+
+	SIWaitRealTransfer();
+
+	u32 result = read32(REAL_SI_CONTROL);
+	u32 err;
+	if (result & 1)
+	{
+		dbgprintf("SI:GBA link transfer timed out\r\n");
+		err = SI_ERROR_NO_RESPONSE;
+		*comerr = true;
+	}
+	else
+	{
+		err = (read32(REAL_SI_STATUS) >> (8 * (3 - GBALinkPhys))) & 0xF;
+		*comerr = !!(result & (1 << 29));
+	}
+	/* Acknowledge the real transfer complete interrupt */
+	write32(REAL_SI_CONTROL, (result & (1 << 27)) | (1 << 31));
+	GBALinkLastTransfer = read32(HW_TIMER);
+	return err;
+}
+
+/* Prepare the real channel: a GBA only answers direct transfers, never poll it */
+static void SIGBAPrepare(void)
+{
+	u32 poll = read32(REAL_SI_POLL);
+	if (poll & (0x80 >> GBALinkPhys))
+		write32(REAL_SI_POLL, poll & ~(0x80 >> GBALinkPhys));
+
+	SIWaitRealTransfer();
+}
+
+/* Publish the result of a Get Type/Reset command for SIGetType.S */
+static void SIGBAUpdateType(u32 response, u32 err, bool comerr)
+{
+	u32 type;
+	if (comerr)
+		type = err ? err : SI_ERROR_NO_RESPONSE;
+	else
+		type = response & 0xFFFFFF00; //3 byte answer, like the SDK
+	write32(GBA_LINK_TYPE, type);
+	sync_after_write((void*)GBA_LINK_TYPE, 0x20);
+}
+
+/*
  * Run the game's pending transfer on the real SI channel the GBA is
  * wired to, then report the result back through the emulated registers
  * as if it happened on the game's port.
@@ -77,49 +143,26 @@ static void SIGBALinkTransfer(u32 *control, u32 *status)
 {
 	u32 outlen = (*control >> 16) & 0x7F;
 	u32 inlen = (*control >> 8) & 0x7F;
+	u32 cmd = read32(SI_IO_BUF) >> 24;
 	u32 i;
+	bool comerr;
 
-	/* A GBA only answers direct transfers, never poll it */
-	u32 poll = read32(REAL_SI_POLL);
-	if (poll & (0x80 >> GBALinkPhys))
-		write32(REAL_SI_POLL, poll & ~(0x80 >> GBALinkPhys));
-
-	SIWaitRealTransfer();
+	SIGBAPrepare();
 
 	/* Output buffer, 0 length means 128 bytes */
 	for (i = 0; i < (outlen ? outlen : 0x80); i += 4)
 		write32(REAL_SI_IO_BUF + i, read32(SI_IO_BUF + i));
 
-	/* Clear the channel's error bits, then start the transfer.
-	   Keep RDSTINTMSK as-is and leave TCINTMSK off so the PPC never
-	   sees an interrupt from the real hardware. */
-	write32(REAL_SI_STATUS, 0x0F000000 >> (8 * GBALinkPhys));
-	u32 real = read32(REAL_SI_CONTROL) & (1 << 27);
-	write32(REAL_SI_CONTROL, real | (1 << 31) | (outlen << 16) | (inlen << 8) | (GBALinkPhys << 1) | 1);
-
-	SIWaitRealTransfer();
-
-	u32 result = read32(REAL_SI_CONTROL);
-	u32 err;
-	bool comerr;
-	if (result & 1)
-	{
-		dbgprintf("SI:GBA link transfer timed out\r\n");
-		err = SI_ERROR_NO_RESPONSE;
-		comerr = true;
-	}
-	else
-	{
-		err = (read32(REAL_SI_STATUS) >> (8 * (3 - GBALinkPhys))) & 0xF;
-		comerr = !!(result & (1 << 29));
-	}
-	/* Acknowledge the real transfer complete interrupt */
-	write32(REAL_SI_CONTROL, (result & (1 << 27)) | (1 << 31));
+	u32 err = SIGBARealTransfer(outlen, inlen, &comerr);
 
 	/* Input buffer */
 	for (i = 0; i < (inlen ? inlen : 0x80); i += 4)
 		write32(SI_IO_BUF + i, read32(REAL_SI_IO_BUF + i));
 	sync_after_write((void*)SI_IO_BUF, 0x80);
+
+	/* Get Type and Reset both answer with the type */
+	if ((cmd == 0x00 || cmd == 0xFF) && inlen == 3)
+		SIGBAUpdateType(read32(REAL_SI_IO_BUF), err, comerr);
 
 	/* Move the error bits over to the game's port */
 	u32 shift = 8 * (3 - GBALinkPort);
@@ -131,6 +174,23 @@ static void SIGBALinkTransfer(u32 *control, u32 *status)
 		*control |= (1 << 29);
 	else
 		*control &= ~(1 << 29);
+}
+
+/*
+ * Our SIGetType never touches the SI, so keep the GBA port's type fresh
+ * with a Get Type command whenever the game has left the port alone.
+ */
+static void SIGBAProbe(void)
+{
+	bool comerr;
+
+	if (TimerDiffTicks(GBALinkLastTransfer) < GBA_LINK_PROBE)
+		return;
+
+	SIGBAPrepare();
+	write32(REAL_SI_IO_BUF, 0x00000000); //Get Type
+	u32 err = SIGBARealTransfer(1, 3, &comerr);
+	SIGBAUpdateType(read32(REAL_SI_IO_BUF), err, comerr);
 }
 
 void SIInterrupt()
@@ -259,6 +319,8 @@ void SIUpdateRegisters()
 		//	prev_chan = cur_chan;
 		//}
 	}
+	else if (GBALinkPort >= 0 && TRIGame == TRI_NONE)
+		SIGBAProbe();
 	if (cur_status & 0x80000000)
 	{
 		//dbgprintf("Read SI Status: %08x\r\n", cur_status);
