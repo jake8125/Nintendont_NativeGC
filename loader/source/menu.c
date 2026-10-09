@@ -943,14 +943,14 @@ static const char *const *GetSettingsDescription(const MenuCtx *ctx)
 				static const char *desc_max_pads[] = {
 					"Set the maximum number of",
 					"native GameCube controller",
-					"ports to use on Wii.",
+					"ports to use. Works together",
+					"with USB HID and Bluetooth.",
 					"",
-					"This should usually be kept",
-					"at 4 to enable all ports",
+					"Wii U: set to the number of",
+					"wired SI ports (e.g. 1 for",
+					"a TP69 port mod), else 0.",
 					"",
-					"This option has no effect on",
-					"Wii U and Wii Family Edition",
-					"systems.",
+					"No effect on Wii VC.",
 					NULL
 				};
 				return desc_max_pads;
@@ -1010,10 +1010,10 @@ static const char *const *GetSettingsDescription(const MenuCtx *ctx)
 					"",
 					"NOTE: Enabling Native Control",
 					"will disable Bluetooth and",
-					"USB HID controllers.",
+					"USB HID controllers. To mix",
+					"native and USB, use Max Pads.",
 					"",
-					"This option is not available",
-					"on Wii U.",
+					"Not available on Wii VC.",
 					NULL
 				};
 				return desc_native_si;
@@ -1303,7 +1303,7 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 			{
 				case NIN_SETTINGS_MAX_PADS:
 					// Maximum native controllers.
-					// Not available on Wii U.
+					// Not available on Wii VC.
 					ncfg->MaxPads++;
 					if (ncfg->MaxPads > NIN_CFG_MAXPAD) {
 						ncfg->MaxPads = 0;
@@ -1470,10 +1470,10 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 			}
 		}
 
-		// Maximum number of emulated controllers.
-		// Not available on Wii U.
+		// Maximum number of native controllers.
+		// Not available on Wii VC.
 		// TODO: Disable on RVL-101?
-		PrintFormat(MENU_SIZE, (!IsWiiU() ? BLACK : DARK_GRAY), MENU_POS_X+50, SettingY(ListLoopIndex),
+		PrintFormat(MENU_SIZE, (!isWiiVC ? BLACK : DARK_GRAY), MENU_POS_X+50, SettingY(ListLoopIndex),
 			    "%-18s:%d", OptionStrings[ListLoopIndex], (ncfg->MaxPads));
 		ListLoopIndex++;
 
@@ -1550,7 +1550,7 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 
 		// Native controllers. (Required for GBA link; disables Bluetooth and USB HID.)
 		// TODO: Gray out on RVL-101?
-		PrintFormat(MENU_SIZE, (IsWiiU() ? DARK_GRAY : BLACK), MENU_POS_X + 50, SettingY(ListLoopIndex),
+		PrintFormat(MENU_SIZE, (isWiiVC ? DARK_GRAY : BLACK), MENU_POS_X + 50, SettingY(ListLoopIndex),
 			    "%-18s:%-4s", OptionStrings[ListLoopIndex],
 			    (ncfg->Config & (NIN_CFG_NATIVE_SI)) ? "On " : "Off");
 		ListLoopIndex++;
@@ -1633,7 +1633,8 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 		u32 cursor_color = BLACK;
 		if (ctx->settings.settingPart == 0) {
 			if ((!IsWiiU() && ctx->settings.posX == NIN_CFG_BIT_USB) ||
-			     (IsWiiU() && ctx->settings.posX == NIN_CFG_NATIVE_SI))
+			     (isWiiVC && (ctx->settings.posX == NIN_SETTINGS_NATIVE_SI ||
+					  ctx->settings.posX == NIN_SETTINGS_MAX_PADS)))
 			{
 				// Setting is not usable on this platform.
 				// Gray out the cursor, too.

@@ -130,7 +130,7 @@ void FPAD_Update( void )
 		PAD_Stick_Y |= Pad[i].stickY;
 		PAD_Stick_X |= Pad[i].stickX;
 	}
-	if(!IsWiiU())
+	if(!isWiiVC)
 	{
 		PAD_ScanPads();
 		for(i = 0; i < PAD_CHANMAX; ++i)

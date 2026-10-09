@@ -1657,7 +1657,8 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 		}
 	}
 	DisableEXIPatch = (TRIGame == TRI_NONE && ConfigGetConfig(NIN_CFG_MEMCARDEMU) == false);
-	DisableSIPatch = (!IsWiiU() && TRIGame == TRI_NONE && ConfigGetConfig(NIN_CFG_NATIVE_SI));
+	// Wii VC has no SI hardware; real Wii U (vWii) can use native SI (e.g. TP69 port mod).
+	DisableSIPatch = (!isWiiVC && TRIGame == TRI_NONE && ConfigGetConfig(NIN_CFG_NATIVE_SI));
 
 	bool PatchWide = ConfigGetConfig(NIN_CFG_FORCE_WIDE);
 	if(PatchWide && PatchStaticWidescreen(TITLE_ID, GAME_ID & 0xFF)) //if further patching is needed
