@@ -1019,6 +1019,22 @@ static const char *const *GetSettingsDescription(const MenuCtx *ctx)
 				return desc_native_si;
 			}
 
+			case NIN_SETTINGS_GBA_LINK: {
+				static const char *desc_gba_link[] = {
+					"Connect a GBA link cable to",
+					"the real GameCube port and",
+					"show it to the game on the",
+					"selected port. Other ports",
+					"keep using USB HID and",
+					"Bluetooth controllers.",
+					"",
+					"Keep Native Control off.",
+					"Not available on Wii VC.",
+					NULL
+				};
+				return desc_gba_link;
+			}
+
 			default:
 				break;
 		}
@@ -1368,6 +1384,19 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 					ncfg->Config ^= (NIN_CFG_NATIVE_SI);
 					break;
 
+				case NIN_SETTINGS_GBA_LINK:
+					// Off -> Port 1 -> ... -> Port 4 -> Off.
+					// The real SI channel bits are left alone.
+					if (!(ncfg->Config & NIN_CFG_GBA_LINK)) {
+						ncfg->Config &= ~NIN_CFG_GBA_PORT_MASK;
+						ncfg->Config |= NIN_CFG_GBA_LINK;
+					} else if (NIN_CFG_GBA_PORT(ncfg->Config) < NIN_CFG_MAXPAD - 1) {
+						ncfg->Config += (1 << NIN_CFG_BIT_GBA_PORT);
+					} else {
+						ncfg->Config &= ~(NIN_CFG_GBA_LINK | NIN_CFG_GBA_PORT_MASK);
+					}
+					break;
+
 				default:
 					break;
 			}
@@ -1555,6 +1584,16 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 			    (ncfg->Config & (NIN_CFG_NATIVE_SI)) ? "On " : "Off");
 		ListLoopIndex++;
 
+		// GBA link cable on the real SI port, shown to the game on another port.
+		if (ncfg->Config & NIN_CFG_GBA_LINK) {
+			PrintFormat(MENU_SIZE, (isWiiVC ? DARK_GRAY : BLACK), MENU_POS_X + 50, SettingY(ListLoopIndex),
+				    "%-18s:%d   ", OptionStrings[ListLoopIndex], NIN_CFG_GBA_PORT(ncfg->Config) + 1);
+		} else {
+			PrintFormat(MENU_SIZE, (isWiiVC ? DARK_GRAY : BLACK), MENU_POS_X + 50, SettingY(ListLoopIndex),
+				    "%-18s:%-4s", OptionStrings[ListLoopIndex], "Off");
+		}
+		ListLoopIndex++;
+
 		/** Right column **/
 		ListLoopIndex = 0; //reset on other side
 
@@ -1634,7 +1673,8 @@ static bool UpdateSettingsMenu(MenuCtx *ctx)
 		if (ctx->settings.settingPart == 0) {
 			if ((!IsWiiU() && ctx->settings.posX == NIN_CFG_BIT_USB) ||
 			     (isWiiVC && (ctx->settings.posX == NIN_SETTINGS_NATIVE_SI ||
-					  ctx->settings.posX == NIN_SETTINGS_MAX_PADS)))
+					  ctx->settings.posX == NIN_SETTINGS_MAX_PADS ||
+					  ctx->settings.posX == NIN_SETTINGS_GBA_LINK)))
 			{
 				// Setting is not usable on this platform.
 				// Gray out the cursor, too.

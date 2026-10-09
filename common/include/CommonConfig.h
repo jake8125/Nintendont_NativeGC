@@ -52,6 +52,9 @@ enum ninconfigbitpos
 	NIN_CFG_BIT_CC_RUMBLE	= (17),
 	NIN_CFG_BIT_SKIP_IPL	= (18),
 	NIN_CFG_BIT_BBA_EMU		= (19),
+	NIN_CFG_BIT_GBA_LINK	= (20),	// Forward one port's SI transfers to a real SI channel
+	NIN_CFG_BIT_GBA_PORT	= (21),	// 2 bits: port the game sees the GBA on (0-3)
+	NIN_CFG_BIT_GBA_PHYS	= (23),	// 2 bits: real SI channel the GBA is wired to (0-3)
 
 	// Internal kernel settings.
 	NIN_CFG_BIT_MC_SLOTB	= (31),	// Slot B image is loaded
@@ -81,6 +84,9 @@ enum ninconfig
 	NIN_CFG_CC_RUMBLE	= (1<<NIN_CFG_BIT_CC_RUMBLE),
 	NIN_CFG_SKIP_IPL	= (1<<NIN_CFG_BIT_SKIP_IPL),
 	NIN_CFG_BBA_EMU		= (1<<NIN_CFG_BIT_BBA_EMU),
+	NIN_CFG_GBA_LINK	= (1<<NIN_CFG_BIT_GBA_LINK),
+	NIN_CFG_GBA_PORT_MASK	= (3<<NIN_CFG_BIT_GBA_PORT),
+	NIN_CFG_GBA_PHYS_MASK	= (3<<NIN_CFG_BIT_GBA_PHYS),
 
 	NIN_CFG_MC_SLOTB	= (1<<NIN_CFG_BIT_MC_SLOTB),
 };
@@ -94,8 +100,13 @@ enum ninextrasettings
 	NIN_SETTINGS_MEMCARDBLOCKS,
 	NIN_SETTINGS_MEMCARDMULTI,
 	NIN_SETTINGS_NATIVE_SI,
+	NIN_SETTINGS_GBA_LINK,
 	NIN_SETTINGS_LAST,
 };
+
+// GBA link passthrough: game port and real SI channel.
+#define NIN_CFG_GBA_PORT(cfg)	(((cfg) & NIN_CFG_GBA_PORT_MASK) >> NIN_CFG_BIT_GBA_PORT)
+#define NIN_CFG_GBA_PHYS(cfg)	(((cfg) & NIN_CFG_GBA_PHYS_MASK) >> NIN_CFG_BIT_GBA_PHYS)
 
 enum ninvideomodeindex
 {

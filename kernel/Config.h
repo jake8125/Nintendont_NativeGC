@@ -80,6 +80,20 @@ static inline u32 ConfigGetMaxPads(void)
 	return ncfg->MaxPads;
 }
 
+// Game port (0-3) whose SI transfers go to real hardware, or -1 if off.
+static inline s32 ConfigGetGBALinkPort(void)
+{
+	if (!(ncfg->Config & NIN_CFG_GBA_LINK))
+		return -1;
+	return NIN_CFG_GBA_PORT(ncfg->Config);
+}
+
+// Real SI channel the GBA link cable is wired to.
+static inline u32 ConfigGetGBALinkPhys(void)
+{
+	return NIN_CFG_GBA_PHYS(ncfg->Config);
+}
+
 static inline u32 ConfigGetGameID(void)
 {
 	return ncfg->GameID;

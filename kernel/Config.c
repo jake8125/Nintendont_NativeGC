@@ -44,7 +44,10 @@ void ConfigInit( void )
 		// Wii VC has no SI hardware. Real Wii U (vWii) keeps MaxPads
 		// so native ports (e.g. TP69 mod) can be mixed with HID/BT.
 		if (isWiiVC)
+		{
 			ncfg->MaxPads = 0;
+			ncfg->Config &= ~NIN_CFG_GBA_LINK;
+		}
 
 		// Disable debugging and the drive access LED.
 		ncfg->Config &= ~(NIN_CFG_DEBUGGER | NIN_CFG_DEBUGWAIT | NIN_CFG_LED);

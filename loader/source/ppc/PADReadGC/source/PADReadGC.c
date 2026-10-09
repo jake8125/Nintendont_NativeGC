@@ -104,6 +104,10 @@ u32 PADRead(u32 calledByGame)
 		MaxPads = 0;
 
 	u32 WiiUGamepadSlot = ((NIN_CFG*)0x93004000)->WiiUGamepadSlot;
+	/* GBA link: this port belongs to the GBA on the real SI channel */
+	u32 cfg = ((NIN_CFG*)0x93004000)->Config;
+	u32 GBALinkPort = (calledByGame && (cfg & NIN_CFG_GBA_LINK)) ? NIN_CFG_GBA_PORT(cfg) : HID_PAD_NONE;
+	u32 GBALinkPhys = (GBALinkPort != HID_PAD_NONE) ? NIN_CFG_GBA_PHYS(cfg) : HID_PAD_NONE;
 	u32 HIDPad = (*HID_STATUS == 0) ? HID_PAD_NONE : HID_PAD_NOT_SET;
 	u32 chan;
 
@@ -213,6 +217,8 @@ u32 PADRead(u32 calledByGame)
               *HIDMotor = (MotorCommand[0]&0x3);
 		for (chan = 0; (chan < MaxPads); ++chan)
 		{
+			if (chan == GBALinkPhys) //kernel drives this channel
+				continue;
 			/* transfer the actual data */
 			u32 x, PADButtonsStick, PADTriggerCStick;
 			u32 addr = 0xCD006400 + (0x0c * chan);
@@ -372,6 +378,8 @@ u32 PADRead(u32 calledByGame)
 	u32 HIDMemPrep = 0;
 	if (HIDPad == HID_PAD_NOT_SET)
 		HIDPad = MaxPads;
+	if (HIDPad == GBALinkPort)
+		HIDPad++;
 
 	for (chan = HIDPad; (chan < HID_PAD_NONE); (HID_CTRL->MultiIn == 3 || HID_CTRL->MultiIn == 4) ? (++chan) : (chan = HID_PAD_NONE)) // Run once unless MultiIn == 3
 	{
@@ -837,7 +845,7 @@ u32 PADRead(u32 calledByGame)
 
 	for(chan = 0; chan < MaxPads; ++chan)	//bluetooth controller loop
 	{
-		if(used & (1<<chan))
+		if((used & (1<<chan)) || chan == GBALinkPort)
 		{
 			BTPadFree[chan] = 0;
 			continue;
@@ -1545,12 +1553,18 @@ u32 PADRead(u32 calledByGame)
 		for(chan = 0; chan < 4; ++chan)
 			used |= (1<<chan);
 	}
+	/* The game must never see a controller on the GBA port */
+	if (GBALinkPort != HID_PAD_NONE)
+		used &= ~(1<<GBALinkPort);
 
 	if(*PADSwitchRequired)
 	{
-		*(vu32*)0xD3026438 = (*(vu32*)0xD3026438 == 0) ? 0x20202020 : 0; //switch between new data and no data
+		u32 SIStatus = *(vu32*)0xD3026438;
+		u32 GBAMask = (GBALinkPort != HID_PAD_NONE) ? (0xFF000000 >> (8*GBALinkPort)) : 0;
+		//switch between new data and no data, leave the GBA port's real status alone
+		*(vu32*)0xD3026438 = (((SIStatus & ~GBAMask) == 0) ? (0x20202020 & ~GBAMask) : 0) | (SIStatus & GBAMask);
 		for(chan = 0; chan < 4; ++chan)
-			Pad[chan].err = ((used & (1<<chan)) && *SIInited) ? ((*(vu32*)0xD3026438 == 0) ? -3 : 0) : -1;
+			Pad[chan].err = ((used & (1<<chan)) && *SIInited) ? (((*(vu32*)0xD3026438 & (0x20000000 >> (8*chan))) == 0) ? -3 : 0) : -1;
 	}
 	else
 	{

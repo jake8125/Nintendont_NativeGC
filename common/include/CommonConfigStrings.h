@@ -26,6 +26,7 @@ const char* OptionStrings[] =
 	"Memcard Blocks",
 	"Memcard Multi",
 	"Native Control",
+	"GBA Link Port",
 };
 
 const char* LanguageStrings[] =

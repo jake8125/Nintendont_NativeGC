@@ -24,9 +24,24 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #define SI_GC_CONTROLLER 0x09000000
 #define SI_ERROR_NO_RESPONSE 0x08
 
+/* Real SI registers, as seen from the Starlet */
+#define REAL_SI_BASE	0x0D806400
+#define REAL_SI_POLL	(REAL_SI_BASE+0x30)
+#define REAL_SI_CONTROL	(REAL_SI_BASE+0x34)
+#define REAL_SI_STATUS	(REAL_SI_BASE+0x38)
+#define REAL_SI_IO_BUF	(REAL_SI_BASE+0x80)
+
+/* ~5ms, a GBA transfer takes well under 1ms */
+#define GBA_LINK_TIMEOUT	9500
+
+extern vu32 TRIGame;
+
 u32 SI_IRQ = 0;
 static bool complete = true;
 static u32 cur_control = 0;
+/* GBA link passthrough: game port and real SI channel, GBALinkPort -1 = off */
+static s32 GBALinkPort = -1;
+static u32 GBALinkPhys = 0;
 void SIInit()
 {
 	memset((void*)SI_BASE, 0, 0x120);
@@ -39,6 +54,83 @@ void SIInit()
 	SI_IRQ = 0;
 	complete = true;
 	cur_control = 0;
+
+	GBALinkPort = ConfigGetGBALinkPort();
+	GBALinkPhys = ConfigGetGBALinkPhys();
+	if (GBALinkPort >= 0)
+		dbgprintf("SI:GBA link on port %d, real channel %d\r\n", GBALinkPort + 1, GBALinkPhys);
+}
+
+static void SIWaitRealTransfer(void)
+{
+	u32 start = read32(HW_TIMER);
+	while ((read32(REAL_SI_CONTROL) & 1) && TimerDiffTicks(start) < GBA_LINK_TIMEOUT)
+		;
+}
+
+/*
+ * Run the game's pending transfer on the real SI channel the GBA is
+ * wired to, then report the result back through the emulated registers
+ * as if it happened on the game's port.
+ */
+static void SIGBALinkTransfer(u32 *control, u32 *status)
+{
+	u32 outlen = (*control >> 16) & 0x7F;
+	u32 inlen = (*control >> 8) & 0x7F;
+	u32 i;
+
+	/* A GBA only answers direct transfers, never poll it */
+	u32 poll = read32(REAL_SI_POLL);
+	if (poll & (0x80 >> GBALinkPhys))
+		write32(REAL_SI_POLL, poll & ~(0x80 >> GBALinkPhys));
+
+	SIWaitRealTransfer();
+
+	/* Output buffer, 0 length means 128 bytes */
+	for (i = 0; i < (outlen ? outlen : 0x80); i += 4)
+		write32(REAL_SI_IO_BUF + i, read32(SI_IO_BUF + i));
+
+	/* Clear the channel's error bits, then start the transfer.
+	   Keep RDSTINTMSK as-is and leave TCINTMSK off so the PPC never
+	   sees an interrupt from the real hardware. */
+	write32(REAL_SI_STATUS, 0x0F000000 >> (8 * GBALinkPhys));
+	u32 real = read32(REAL_SI_CONTROL) & (1 << 27);
+	write32(REAL_SI_CONTROL, real | (1 << 31) | (outlen << 16) | (inlen << 8) | (GBALinkPhys << 1) | 1);
+
+	SIWaitRealTransfer();
+
+	u32 result = read32(REAL_SI_CONTROL);
+	u32 err;
+	bool comerr;
+	if (result & 1)
+	{
+		dbgprintf("SI:GBA link transfer timed out\r\n");
+		err = SI_ERROR_NO_RESPONSE;
+		comerr = true;
+	}
+	else
+	{
+		err = (read32(REAL_SI_STATUS) >> (8 * (3 - GBALinkPhys))) & 0xF;
+		comerr = !!(result & (1 << 29));
+	}
+	/* Acknowledge the real transfer complete interrupt */
+	write32(REAL_SI_CONTROL, (result & (1 << 27)) | (1 << 31));
+
+	/* Input buffer */
+	for (i = 0; i < (inlen ? inlen : 0x80); i += 4)
+		write32(SI_IO_BUF + i, read32(REAL_SI_IO_BUF + i));
+	sync_after_write((void*)SI_IO_BUF, 0x80);
+
+	/* Move the error bits over to the game's port */
+	u32 shift = 8 * (3 - GBALinkPort);
+	*status = (*status & ~(0x0F << shift)) | (err << shift);
+	write32(SI_STATUS, *status);
+	sync_after_write((void*)SI_STATUS, 4);
+
+	if (comerr)
+		*control |= (1 << 29);
+	else
+		*control &= ~(1 << 29);
 }
 
 void SIInterrupt()
@@ -89,39 +181,48 @@ void SIUpdateRegisters()
 	if (cur_control & (1 << 0)) // transfer
 	{
 		//dbgprintf("SI Buffer Cmd: %08x\r\n", read32(SI_IO_BUF));
-		cur_control |= (1<<29); //we normally always have some communication error?
-		//cur_control &= ~(1 << 29); //we normally always have some communication error?
 		u32 chan = (cur_control >> 1) & 0x3;
 		u32 ChanBuff = PAD_BUFF + (chan * 0xC);
 		bool PadGood = !!(read32(0x13003024) & (1<<chan));
-		if (chan >= ConfigGetMaxPads())
+		/* With GBA link, MaxPads limits real ports only; emulated pads still
+		   need to answer Get Type so the game can tell them from the GBA. */
+		if (chan >= ConfigGetMaxPads() && GBALinkPort < 0)
 			PadGood = false;
-		switch ((read32(SI_IO_BUF) >> 24) & 0xFF)
+		if ((s32)chan == GBALinkPort && TRIGame == TRI_NONE)
 		{
-			case 0x00: // Get Type
-				{
-					//dbgprintf("SI GetType\r\n");
-					write32(SI_IO_BUF, PadGood ? SI_GC_CONTROLLER : SI_ERROR_NO_RESPONSE);
-					sync_after_write((void*)SI_IO_BUF, 4);
-				} break;
-			case 0x40: // Direct Cmd
-				{
-					//dbgprintf("SI Direct\r\n");
-					//Might need to fix this (multiple modes)
-					write32(SI_IO_BUF + 0, read32(ChanBuff + 0));
-					write32(SI_IO_BUF + 4, read32(ChanBuff + 4));
-					sync_after_write((void*)SI_IO_BUF, 8);
-				} break;
-			case 0x41: // Origin
-			case 0x42: // Calibrate
-				{
-					//dbgprintf("SI Origin/Cal\r\n");
-					//Might need to fix this (multiple modes)
-					write32(SI_IO_BUF + 0, 0x41008080);
-					write32(SI_IO_BUF + 4, 0x80801F1F);
-					write32(SI_IO_BUF + 8, 0x00000000);
-					sync_after_write((void*)SI_IO_BUF, 12);
-				} break;
+			SIGBALinkTransfer(&cur_control, &cur_status);
+		}
+		else
+		{
+			cur_control |= (1<<29); //we normally always have some communication error?
+			//cur_control &= ~(1 << 29); //we normally always have some communication error?
+			switch ((read32(SI_IO_BUF) >> 24) & 0xFF)
+			{
+				case 0x00: // Get Type
+					{
+						//dbgprintf("SI GetType\r\n");
+						write32(SI_IO_BUF, PadGood ? SI_GC_CONTROLLER : SI_ERROR_NO_RESPONSE);
+						sync_after_write((void*)SI_IO_BUF, 4);
+					} break;
+				case 0x40: // Direct Cmd
+					{
+						//dbgprintf("SI Direct\r\n");
+						//Might need to fix this (multiple modes)
+						write32(SI_IO_BUF + 0, read32(ChanBuff + 0));
+						write32(SI_IO_BUF + 4, read32(ChanBuff + 4));
+						sync_after_write((void*)SI_IO_BUF, 8);
+					} break;
+				case 0x41: // Origin
+				case 0x42: // Calibrate
+					{
+						//dbgprintf("SI Origin/Cal\r\n");
+						//Might need to fix this (multiple modes)
+						write32(SI_IO_BUF + 0, 0x41008080);
+						write32(SI_IO_BUF + 4, 0x80801F1F);
+						write32(SI_IO_BUF + 8, 0x00000000);
+						sync_after_write((void*)SI_IO_BUF, 12);
+					} break;
+			}
 		}
 		if (!PadGood)
 		{
@@ -173,7 +274,13 @@ void SIUpdateRegisters()
 			write32(ChanAdd + 4, PadGood ? 0x00808080 : 0);//read32(0x1300280C+0));
 			write32(ChanAdd + 8, PadGood ? 0x80800000 : 0);//read32(0x1300280C+4));
 		}
-		cur_status = 0x20202020;
+		if (GBALinkPort >= 0) // keep the GBA port's real error bits
+		{
+			u32 mask = 0xFF << (8 * (3 - GBALinkPort));
+			cur_status = (0x20202020 & ~mask) | (cur_status & mask & 0x0F0F0F0F);
+		}
+		else
+			cur_status = 0x20202020;
 		//cur_status = 0x0;
 		sync_after_write((void*)SI_CHAN_0, 0x30);
 		//dbgprintf("Read SI Cmd 0-3: 0x%08X, 0x%08X, 0x%08X, 0x%08X,\r\n", read32(SI_CHAN_0), read32(SI_CHAN_1), read32(SI_CHAN_2), read32(SI_CHAN_3));
