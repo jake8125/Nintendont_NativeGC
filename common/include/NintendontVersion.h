@@ -13,5 +13,6 @@
 // "Special" version.
 // This should only be set in custom builds, i.e. not mainline.
 //#define NIN_SPECIAL_VERSION			"-BBABeta13"
+#define NIN_SPECIAL_VERSION			"-GBALink"
 
 #endif

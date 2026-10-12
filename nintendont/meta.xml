@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="ISO-8859-1" standalone="yes"?>
 <app version="1">
-	<name>Nintendont</name>
+	<name>Nintendont GBA Link</name>
 	<coder>FIX94, crediar</coder>
 	<version>4.431</version>
 	<release_date>20161218000000</release_date>
-	<short_description>Gamecube Loader</short_description>
+	<short_description>Gamecube Loader with GBA Link passthrough</short_description>
 	<long_description>Commiters: GerbilSoft, JoostinOnline, GreyRogue, Howard, Cyan, nastys 
 
  Project website: https://github.com/FIX94/Nintendont 
