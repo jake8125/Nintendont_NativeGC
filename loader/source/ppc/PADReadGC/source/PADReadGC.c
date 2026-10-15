@@ -91,6 +91,9 @@ u32 PADRead(u32 calledByGame)
 	// Register r2 not changed
 	u32 Rumble = 0, memInvalidate, memFlush;
 	u32 used = 0;
+	/* Start+Z+R on any pad resets; written once at the end so a later
+	   pad without the combo can't clear it */
+	u32 ResetCombo = 0, ResetChecked = 0;
 
 	PADStatus *Pad = (PADStatus*)(0x93003100); //PadBuff
 	u32 MaxPads;
@@ -195,12 +198,8 @@ u32 PADRead(u32 calledByGame)
 		//write in mapped out buttons
 		Pad[WiiUGamepadSlot].button = button;
 		if((Pad[WiiUGamepadSlot].button&0x1030) == 0x1030) //reset by pressing start, Z, R
-		{
-			/* reset status 3 */
-			*RESET_STATUS = 0x3DEA;
-		}
-		else /* for held status */
-			*RESET_STATUS = 0;
+			ResetCombo = 1;
+		ResetChecked = 1;
 		//do scale, deadzone and clamp
 		s8 tmp_stick8; s16 tmp_stick16;
 		_DRC_BUILD_TMPSTICK(i2cdata[4]);
@@ -360,12 +359,8 @@ u32 PADRead(u32 calledByGame)
 			Pad[chan].substickY = (s8)tempStick;
 
 			if((Pad[chan].button&0x1030) == 0x1030)	//reset by pressing start, Z, R
-			{
-				/* reset status 3 */
-				*RESET_STATUS = 0x3DEA;
-			}
-			else /* for held status */
-				*RESET_STATUS = 0;
+				ResetCombo = 1;
+			ResetChecked = 1;
 			/* clear unneeded button attributes */
 			Pad[chan].button &= 0x9F7F;
 			/* set current command */
@@ -637,13 +632,13 @@ u32 PADRead(u32 calledByGame)
 			button |= PAD_BUTTON_START;
 		Pad[chan].button = button;
 
+		//exit by pressing B,Z,R,PAD_BUTTON_DOWN, same as native and bluetooth pads
+		if(calledByGame && (Pad[chan].button&0x234) == 0x234)
+			goto DoExit;
+
 		if((Pad[chan].button&0x1030) == 0x1030)	//reset by pressing start, Z, R
-		{
-			/* reset status 3 */
-			*RESET_STATUS = 0x3DEA;
-		}
-		else /* for held status */
-			*RESET_STATUS = 0;
+			ResetCombo = 1;
+		ResetChecked = 1;
 
 		/* then analog sticks */
 		s8 stickX, stickY, substickX, substickY;
@@ -1539,13 +1534,12 @@ u32 PADRead(u32 calledByGame)
 			goto DoExit;
 		}
 		if((Pad[chan].button&0x1030) == 0x1030)	//reset by pressing start, Z, R
-		{
-			/* reset status 3 */
-			*RESET_STATUS = 0x3DEA;
-		}
-		else // for held status
-			*RESET_STATUS = 0;
+			ResetCombo = 1;
+		ResetChecked = 1;
 	}
+
+	if(ResetChecked)
+		*RESET_STATUS = ResetCombo ? 0x3DEA : 0;
 
 	/* Some games always need the controllers "used" */
 	if(*PADForceConnected)
