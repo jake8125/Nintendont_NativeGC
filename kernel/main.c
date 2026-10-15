@@ -71,6 +71,67 @@ u32 drcAddressAligned = 0;
 bool isWiiVC = false;
 bool wiiVCInternal = false;
 bool isWidescreen = false;
+
+/* Read a word of game memory from a PPC (MEM1) address, 0xDEADBEEF if invalid */
+static u32 PPCRead32(u32 addr)
+{
+	if (addr < 0x80000000 || (addr & 0x7FFFFFFF) >= 0x01800000 || (addr & 3))
+		return 0xDEADBEEF;
+	addr &= 0x01FFFFFF;
+	sync_before_read((void*)(addr & ~0x1F), 0x20);
+	return read32(addr);
+}
+
+static void PPCDumpWords(const char *name, u32 addr, u32 before, u32 after)
+{
+	u32 i;
+	addr &= ~3;
+	dbgprintf("PPC:%s %08X\r\n", name, addr);
+	for (i = addr - before * 4; i < addr + after * 4; i += 0x10)
+		dbgprintf("PPC: %08X: %08X %08X %08X %08X\r\n", i,
+			PPCRead32(i), PPCRead32(i + 4), PPCRead32(i + 8), PPCRead32(i + 12));
+}
+
+/* Saved registers of an OSContext, plus code and call stack around them */
+static void PPCDumpContext(const char *name, u32 ctx)
+{
+	u32 i;
+	if (PPCRead32(ctx) == 0xDEADBEEF)
+	{
+		dbgprintf("PPC:%s context %08X invalid\r\n", name, ctx);
+		return;
+	}
+	u32 srr0 = PPCRead32(ctx + 0x198), lr = PPCRead32(ctx + 0x84), sp = PPCRead32(ctx + 0x4);
+	dbgprintf("PPC:%s context %08X SRR0 %08X SRR1 %08X LR %08X CTR %08X CR %08X\r\n", name, ctx,
+		srr0, PPCRead32(ctx + 0x19C), lr, PPCRead32(ctx + 0x88), PPCRead32(ctx + 0x80));
+	for (i = 0; i < 32; i += 4)
+		dbgprintf("PPC: r%-2u %08X %08X %08X %08X\r\n", i, PPCRead32(ctx + i * 4),
+			PPCRead32(ctx + i * 4 + 4), PPCRead32(ctx + i * 4 + 8), PPCRead32(ctx + i * 4 + 12));
+	PPCDumpWords("code at SRR0", srr0, 16, 16);
+	PPCDumpWords("code at LR", lr, 8, 8);
+	/* Back chain: [sp] = caller's sp, [caller sp + 4] = return address */
+	for (i = 0; i < 16 && PPCRead32(sp) != 0xDEADBEEF && PPCRead32(sp) != 0; i++)
+	{
+		sp = PPCRead32(sp);
+		dbgprintf("PPC: frame %2u sp %08X ret %08X\r\n", i, sp, PPCRead32(sp + 4));
+	}
+}
+
+/*
+ * When the game freezes, the power button still works. Log where the game
+ * was so a hang can be located without a debugger (needs Log enabled).
+ */
+static void PPCDumpState(void)
+{
+	if (!ConfigGetConfig(NIN_CFG_LOG))
+		return;
+	dbgprintf("PPC:State at shutdown\r\n");
+	PPCDumpWords("low memory", 0x80000000, 0, 64);
+	PPCDumpWords("DSI vector", 0x80000300, 0, 16);
+	PPCDumpContext("current", PPCRead32(0x800000D4));
+	PPCDumpContext("thread", PPCRead32(0x800000E4));
+}
+
 int _main( int argc, char *argv[] )
 {
 	//BSS is in DATA section so IOS doesnt touch it, we need to manually clear it
@@ -508,6 +569,7 @@ int _main( int argc, char *argv[] )
 		}
 		if(reset_status == 0x7DEA || (read32(HW_GPIO_IN) & GPIO_POWER))
 		{
+			PPCDumpState();
 			DIFinishAsync();
 			#ifdef PATCHALL
 			BTE_Shutdown();
