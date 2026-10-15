@@ -4,6 +4,7 @@
 
 .set	OSReport,			0xC0001860
 .set	AR_DBG,				0x930031A0
+.set	AR_DMA_LOG,			0xD3150000	#ring log read by the kernel (uncached)
 
 .set	AR_MRAM_TO_ARAM,	0
 .set	AR_ARAM_TO_MRAM,	1
@@ -18,6 +19,19 @@
 #	none
 
 ARStartDMA:
+	#log the request for the kernel's transfer log: count at +0,
+	#1024 entries of type, mainmem, aram, length from +0x10
+	lis		r10,	AR_DMA_LOG@h
+	lwz		r11,	0(r10)
+	addi	r12,	r11,	1
+	stw		r12,	0(r10)
+	rlwinm	r11,	r11,	4,		18,		27	# (count & 0x3FF) * 16
+	add		r11,	r11,	r10
+	stw		r3,		0x10(r11)
+	stw		r4,		0x14(r11)
+	stw		r5,		0x18(r11)
+	stw		r6,		0x1C(r11)
+
 #	lis		r7,	OSReport@h
 #	ori		r7,	r7,	OSReport@l
 #	stw		r4,	4(r7)

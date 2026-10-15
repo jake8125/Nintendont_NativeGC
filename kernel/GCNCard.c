@@ -442,6 +442,7 @@ void GCNCard_Write(int slot, const void *data, u32 length)
  * @param data Buffer for the read data.
  * @param length Length of data to read, in bytes.
  */
+extern void XferLogAdd(u32 type, u32 dest, u32 len);
 void GCNCard_Read(int slot, void *data, u32 length)
 {
 	if (!GCNCard_IsEnabled(slot))
@@ -452,6 +453,7 @@ void GCNCard_Read(int slot, void *data, u32 length)
 	sync_before_read(&ctx->base[ctx->BlockOff], length);
 	memcpy(data, &ctx->base[ctx->BlockOff], length);
 	sync_after_write(data, length);
+	XferLogAdd('C', (u32)data, length);
 }
 
 /**

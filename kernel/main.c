@@ -267,6 +267,142 @@ static void PPCDumpHeaps(u32 known)
 }
 
 /*
+ * Transfer log: every disc and memory card read the kernel copies into game
+ * memory, plus the game's ARAM copies (logged by ARStartDMA.S at 0x13150000),
+ * so a corrupted heap header can be matched to whatever wrote it.
+ */
+#define XFER_LOG_COUNT 512
+static struct { u32 type, dest, len, time; } XferLog[XFER_LOG_COUNT];
+static u32 XferCount = 0;
+#define AR_DMA_LOG 0x13150000
+
+void XferLogAdd(u32 type, u32 dest, u32 len)
+{
+	u32 i = XferCount++ % XFER_LOG_COUNT;
+	XferLog[i].type = type;
+	XferLog[i].dest = dest & 0x01FFFFFF;
+	XferLog[i].len = len;
+	XferLog[i].time = read32(HW_TIMER);
+}
+
+/* Does [dest, dest+len) touch [lo, hi)? physical addresses */
+static bool XferHits(u32 dest, u32 len, u32 lo, u32 hi)
+{
+	return dest < hi && dest + len > lo;
+}
+
+/* Log the transfers that wrote near [lo, hi) or happened after since/arSince */
+static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince)
+{
+	u32 i, n = XferCount < XFER_LOG_COUNT ? XferCount : XFER_LOG_COUNT;
+	dbgprintf("Xfer:%u disc/card transfers logged, showing near %08X-%08X or recent\r\n", XferCount, lo | 0x80000000, hi | 0x80000000);
+	for (i = XferCount - n; i < XferCount; i++)
+	{
+		u32 k = i % XFER_LOG_COUNT;
+		bool near = XferHits(XferLog[k].dest, XferLog[k].len, lo, hi);
+		bool recent = (s32)(XferLog[k].time - since) >= 0;
+		if (near || recent)
+			dbgprintf("Xfer: #%u %s %08X+%05X ends %08X t-%u ms%s\r\n", i, XferLog[k].type == 'D' ? "disc" : "card",
+				XferLog[k].dest | 0x80000000, XferLog[k].len, (XferLog[k].dest + XferLog[k].len) | 0x80000000,
+				(read32(HW_TIMER) - XferLog[k].time) / 1898, near ? " NEAR" : "");
+	}
+	/* ARAM copies: type 1 = ARAM to main memory (writes game memory) */
+	sync_before_read((void*)AR_DMA_LOG, 0x4020);
+	u32 arCount = read32(AR_DMA_LOG), arN = arCount < 1024 ? arCount : 1024;
+	dbgprintf("Xfer:%u ARAM copies logged (%u since last good check)\r\n", arCount, arCount - arSince);
+	for (i = arCount - arN; i < arCount; i++)
+	{
+		u32 e = AR_DMA_LOG + 0x10 + (i % 1024) * 16;
+		u32 type = read32(e), mram = read32(e + 4) & 0x01FFFFE0, aram = read32(e + 8), len = read32(e + 12);
+		bool near = XferHits(mram, len, lo, hi);
+		bool recent = (s32)(i - arSince) >= 0;
+		if (near || recent)
+			dbgprintf("Xfer: #%u aram %s %08X+%05X ends %08X aram %08X%s\r\n", i, type == 1 ? "to mem  " : "from mem",
+				mram | 0x80000000, len, (mram + len) | 0x80000000, aram, near ? " NEAR" : "");
+	}
+}
+
+/*
+ * Pokemon Box heap watch: walk the main JKRExpHeap's used list ~10 times a
+ * second and report the first block header that is broken on two checks in
+ * a row (so a block the game is just updating is not reported), together
+ * with the transfers that could have written it.
+ */
+/*
+ * Read a 16 byte heap block header while the game runs. Write the lines back
+ * before invalidating them: the disc thread may still hold unflushed data
+ * there (it only flushes after its whole copy), and a plain invalidate would
+ * throw that away.
+ */
+static bool HeapReadHeader(u32 b, u32 *magic, u32 *size, u32 *next)
+{
+	if (b < 0x80000000 || (b & 0x7FFFFFFF) >= 0x017FFFF0 || (b & 3))
+		return false;
+	u32 p = b & 0x01FFFFFF, line = p & ~0x1F;
+	sync_after_write((void*)line, 0x40);
+	sync_before_read((void*)line, 0x40);
+	*magic = read32(p);
+	*size = read32(p + 4);
+	*next = read32(p + 12);
+	return true;
+}
+
+static void HeapCheck(void)
+{
+	static u32 timer = 0, lastGood = 0, arLastGood = 0, suspect = 0, done = 0, announced = 0;
+	const u32 heap = 0x8057D4B0;
+	if (done || read32(0) != 0x47505845 || !ConfigGetConfig(NIN_CFG_LOG))
+		return;
+	if (timer && TimerDiffTicks(timer) < 949218) //~0.5s
+		return;
+	timer = read32(HW_TIMER);
+	u32 vtable, start, end, b, prev = 0, n = 0, bad = 0;
+	if (!HeapReadHeader(heap, &vtable, &start, &end) || vtable != 0x801EB0E0) //heap not created yet
+		return;
+	HeapReadHeader(heap + 0x30, &start, &end, &b); //+0x30 start, +0x34 end
+	HeapReadHeader(heap + 0x74, &b, &b, &b);        //+0x80 used list head
+
+	if (!announced)
+	{
+		dbgprintf("HeapCheck:watching heap %08X (%08X-%08X)\r\n", heap, start, end);
+		announced = 1;
+	}
+	while (b != 0 && n < 8000)
+	{
+		u32 magic, size, next;
+		if (b < start || b >= end || !HeapReadHeader(b, &magic, &size, &next) ||
+			(magic >> 16) != 0x484D || size > end - b)
+		{
+			bad = b;
+			break;
+		}
+		prev = b;
+		b = next;
+		n++;
+	}
+	if (!bad)
+	{
+		suspect = 0;
+		lastGood = timer;
+		sync_before_read((void*)AR_DMA_LOG, 0x20);
+		arLastGood = read32(AR_DMA_LOG);
+		return;
+	}
+	if (bad != suspect) //first sighting, confirm on the next check
+	{
+		suspect = bad;
+		return;
+	}
+	done = 1;
+	dbgprintf("HeapCheck:broken block %08X after %u good blocks, previous %08X, last good check %u ms ago\r\n",
+		bad, n, prev, TimerDiffTicks(lastGood) / 1898);
+	if (prev)
+		PPCDumpWords("previous block", prev, 0, 8);
+	PPCDumpWords("around broken block", bad, 8, 8);
+	XferLogReport((bad & 0x01FFFFFF) - 0x200, (bad & 0x01FFFFFF) + 0x20, lastGood, arLastGood);
+}
+
+/*
  * When the game freezes, the power button still works. Log where the game
  * was so a hang can be located without a debugger (needs Log enabled).
  */
@@ -689,6 +825,7 @@ int _main( int argc, char *argv[] )
 		}
 		StreamUpdateRegisters();
 		CheckOSReport();
+		HeapCheck();
 		if(GCNCard_CheckChanges())
 		{
 			Now = read32(HW_TIMER);

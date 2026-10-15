@@ -80,6 +80,7 @@ extern u32 TITLE_ID;
  
 // Triforce
 extern vu32 TRIGame;
+extern void XferLogAdd(u32 type, u32 dest, u32 len);
 extern vu32 useipltri;
 
 static u32 GCAMKeyA;
@@ -881,8 +882,10 @@ u32 DIReadThread(void *arg)
 						u32 pos31A0 = 0x31A0 - ((u32)di_dest + Offset);
 						Patch31A0Backup = read32((u32)di_src + pos31A0);
 					}
-					memcpy( di_dest + Offset, di_src, Length > di_length ? di_length : Length );
+					// never copy past the end of the request
+					memcpy( di_dest + Offset, di_src, Length > di_length - Offset ? di_length - Offset : Length );
 				}
+				XferLogAdd('D', (u32)di_dest, di_length);
 				if(di_msg->ioctl.command == 0)
 				{
 					DoPatches(di_dest, di_length, di_offset);
