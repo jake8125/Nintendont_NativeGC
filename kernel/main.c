@@ -109,6 +109,8 @@ static void PPCDumpContext(const char *name, u32 ctx)
 			PPCRead32(ctx + i * 4 + 4), PPCRead32(ctx + i * 4 + 8), PPCRead32(ctx + i * 4 + 12));
 	PPCDumpWords("code at SRR0", srr0, 16, 16);
 	PPCDumpWords("code at LR", lr, 8, 8);
+	/* An interrupt handler that never returned runs on this stack, below sp */
+	PPCDumpWords("stack around sp", sp, 0xC0, 0x40);
 	/* Back chain: [sp] = caller's sp, [caller sp + 4] = return address */
 	for (i = 0; i < 16 && PPCRead32(sp) != 0xDEADBEEF && PPCRead32(sp) != 0; i++)
 	{
@@ -128,8 +130,14 @@ static void PPCDumpState(void)
 	dbgprintf("PPC:State at shutdown\r\n");
 	PPCDumpWords("low memory", 0x80000000, 0, 64);
 	PPCDumpWords("DSI vector", 0x80000300, 0, 16);
-	PPCDumpContext("current", PPCRead32(0x800000D4));
-	PPCDumpContext("thread", PPCRead32(0x800000E4));
+	u32 i, cur = PPCRead32(0x800000D4), thread = PPCRead32(0x800000E4);
+	PPCDumpContext("current", cur);
+	if (thread != cur)
+		PPCDumpContext("thread", thread);
+	/* Nintendont's fake interrupt flags (RSW, DI, SI, EXI, HSP), pending if non-zero */
+	sync_before_read((void*)INT_BASE, 0xA0);
+	for (i = 0; i < 0xA0; i += 0x20)
+		dbgprintf("PPC: int %08X: %08X %08X\r\n", INT_BASE + i, read32(INT_BASE + i), read32(INT_BASE + i + 4));
 }
 
 int _main( int argc, char *argv[] )
