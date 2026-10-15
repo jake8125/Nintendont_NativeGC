@@ -188,32 +188,46 @@ static void PPCDumpText(u32 start, u32 end)
  */
 static void PPCDumpHeap(u32 heap)
 {
-	u32 off;
+	u32 off, start = PPCRead32(heap + 0x30), end = PPCRead32(heap + 0x34);
 	PPCDumpWords("heap", heap, 0, 0x28);
-	for (off = 0x60; off < 0xA0; off += 4)
+	/* List heads/tails: walk every pointer into the heap, "HM" magic or not
+	   (free blocks may not carry it), and stop at the first block that does
+	   not fit: outside the heap or a size running past its end. */
+	for (off = 0x70; off < 0x90; off += 4)
 	{
 		u32 b = PPCRead32(heap + off);
-		if (b == 0xDEADBEEF || (PPCRead32(b) >> 16) != 0x484D)
+		if (b < start || b >= end)
 			continue;
-		u32 n = 0, total = 0, largest = 0, first = b;
-		while (b != 0 && b != 0xDEADBEEF && n < 5000)
+		u32 n = 0, total = 0, largest = 0, nomagic = 0, prev = 0, first = b;
+		while (b != 0 && n < 5000)
 		{
-			if ((PPCRead32(b) >> 16) != 0x484D)
+			u32 size = PPCRead32(b + 4);
+			if (b < start || b >= end || (b & 3) || size > end - b)
 			{
-				dbgprintf("PPC:  list +%02X: bad block %08X after %u blocks\r\n", off, b, n);
+				dbgprintf("PPC:  list +%02X: bad block %08X after %u blocks, previous %08X\r\n", off, b, n, prev);
+				if (prev)
+					PPCDumpWords("  previous block", prev, 0, 8);
+				PPCDumpWords("  around bad block", b, 16, 16);
 				break;
 			}
-			u32 size = PPCRead32(b + 4);
+			if ((PPCRead32(b) >> 16) != 0x484D)
+			{
+				if (nomagic < 4)
+					PPCDumpWords("  block without HM", b, 4, 8);
+				nomagic++;
+			}
 			total += size;
 			if (size > largest)
 				largest = size;
-			if (n < 6)
+			if (n < 4)
 				dbgprintf("PPC:  list +%02X block %08X: %08X %08X %08X %08X\r\n", off, b,
 					PPCRead32(b), size, PPCRead32(b + 8), PPCRead32(b + 12));
 			n++;
+			prev = b;
 			b = PPCRead32(b + 12);
 		}
-		dbgprintf("PPC:  list +%02X from %08X: %u blocks, total %08X, largest %08X\r\n", off, first, n, total, largest);
+		dbgprintf("PPC:  list +%02X from %08X: %u blocks (%u without HM), total %08X, largest %08X, last %08X\r\n",
+			off, first, n, nomagic, total, largest, prev);
 	}
 }
 
