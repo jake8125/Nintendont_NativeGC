@@ -910,28 +910,6 @@ void PatchPatchBuffer(char *dst)
 	}
 }
 
-/*
- * Pokemon Box: its virtual memory window is moved from 0x90000000 to
- * 0xA0000000 because 0x9xxxxxxx is Nintendont's (MEM2). Move any remaining
- * "lis rX,0x9000" in the VM code between Start and End as well; missing
- * them left part of the game using the old window, which corrupts the main
- * heap (List screen freeze).
- */
-static u32 PatchPokemonBoxVM(u32 Start, u32 End)
-{
-	u32 k, moved = 0;
-	for (k = Start; k <= End; k += 4)
-	{
-		u32 op = read32(k);
-		if ((op & 0xFC1FFFFF) == 0x3C009000) // lis rX,0x9000
-		{
-			write32(k, op + 0x1000); // -> lis rX,0xA000
-			moved++;
-		}
-	}
-	return moved;
-}
-
 static bool IsPokemonDemo()
 {
 	if( (DOLSize == 4101476 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4CCFE0 &&
@@ -4169,7 +4147,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			write32(0x87BB4, 0x3CDFA0D0);
 			write32(0x87C70, 0x3CDFA0F0);
 			
-			dbgprintf("Patch:Patched Pokemon Box NTSC-U (%u extra)\r\n", PatchPokemonBoxVM(0x85E28, 0x87C70));
+			dbgprintf("Patch:Patched Pokemon Box NTSC-U\r\n");
 		}
 		else if(write32A(0x87148, 0x3C60A000, 0x3C609000, 0))
 		{
@@ -4181,7 +4159,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			write32(0x88F04, 0x3CDFA0D0);
 			write32(0x88FC0, 0x3CDFA0F0);
 			
-			dbgprintf("Patch:Patched Pokemon Box PAL (%u extra)\r\n", PatchPokemonBoxVM(0x87148, 0x88FC0));
+			dbgprintf("Patch:Patched Pokemon Box PAL\r\n");
 		}
 		else if(write32A(0x8682C, 0x3C60A000, 0x3C609000, 0))
 		{
@@ -4202,7 +4180,6 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 					moved++;
 				}
 			}
-			moved += PatchPokemonBoxVM(0x8682C, 0x8837C + 0x300);
 			dbgprintf("Patch:Patched Pokemon Box NTSC-J (%u extra)\r\n", moved);
 		}
 	}
