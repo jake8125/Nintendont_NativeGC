@@ -910,6 +910,28 @@ void PatchPatchBuffer(char *dst)
 	}
 }
 
+/*
+ * Pokemon Box: its virtual memory window is moved from 0x90000000 to
+ * 0xA0000000 because 0x9xxxxxxx is Nintendont's (MEM2). Move any remaining
+ * "lis rX,0x9000" in the VM code between Start and End as well; missing
+ * them left part of the game using the old window, which corrupts the main
+ * heap (List screen freeze).
+ */
+static u32 PatchPokemonBoxVM(u32 Start, u32 End)
+{
+	u32 k, moved = 0;
+	for (k = Start; k <= End; k += 4)
+	{
+		u32 op = read32(k);
+		if ((op & 0xFC1FFFFF) == 0x3C009000) // lis rX,0x9000
+		{
+			write32(k, op + 0x1000); // -> lis rX,0xA000
+			moved++;
+		}
+	}
+	return moved;
+}
+
 static bool IsPokemonDemo()
 {
 	if( (DOLSize == 4101476 && DOLMinOff == 0x3100 && DOLMaxOff == 0x4CCFE0 &&
@@ -4136,30 +4158,6 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	}
 	else if( TITLE_ID == 0x475058 )	// Pokemon Box
 	{
-		/* Diagnostics for the List screen heap corruption (needs Log):
-		   the original words the patch below replaces, and every place the
-		   game builds a 0x9xxx high constant or touches segment registers,
-		   the page table base or the TLB. */
-		{
-			static const u32 BoxPatchAddr[] = { 0x85E28, 0x879D4, 0x879D8, 0x87A38, 0x87AF4, 0x87BB4, 0x87C70 };
-			u32 k, shown = 0;
-			for (k = 0; k < sizeof(BoxPatchAddr) / sizeof(BoxPatchAddr[0]); k++)
-				dbgprintf("Box:original %08X: %08X\r\n", BoxPatchAddr[k], read32(BoxPatchAddr[k]));
-			for (k = DOLMinOff & ~3; k < DOLMaxOff && shown < 96; k += 4)
-			{
-				u32 op = read32(k);
-				bool hi9 = (op & 0xFC000000) == 0x3C000000 && ((op >> 12) & 0xF) == 0x9 && (op & 0xFFFF) < 0xA000;
-				bool sr = (op & 0xFC0007FE) == 0x7C0001A4 || (op & 0xFC0007FE) == 0x7C0001E4 || // mtsr, mtsrin
-					(op & 0xFC0007FE) == 0x7C0004A6 || (op & 0xFC0007FE) == 0x7C000526;      // mfsr, mfsrin
-				bool sdr1 = (op & 0xFC1FFFFE) == 0x7C1903A6 || (op & 0xFC1FFFFE) == 0x7C1902A6; // mtsdr1, mfsdr1
-				bool tlb = (op & 0xFC0007FE) == 0x7C000264 || (op & 0xFC0007FE) == 0x7C00046C;  // tlbie, tlbsync
-				if (hi9 || sr || sdr1 || tlb)
-				{
-					dbgprintf("Box:code %08X: %08X\r\n", k | 0x80000000, op);
-					shown++;
-				}
-			}
-		}
 		// SuSo: Change PTE address to A0000000
 		if(write32A(0x85E28, 0x3C60A000, 0x3C609000, 0))
 		{
@@ -4171,7 +4169,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			write32(0x87BB4, 0x3CDFA0D0);
 			write32(0x87C70, 0x3CDFA0F0);
 			
-			dbgprintf("Patch:Patched Pokemon Box NTSC-U\r\n");
+			dbgprintf("Patch:Patched Pokemon Box NTSC-U (%u extra)\r\n", PatchPokemonBoxVM(0x85E28, 0x87C70));
 		}
 		else if(write32A(0x87148, 0x3C60A000, 0x3C609000, 0))
 		{
@@ -4183,7 +4181,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			write32(0x88F04, 0x3CDFA0D0);
 			write32(0x88FC0, 0x3CDFA0F0);
 			
-			dbgprintf("Patch:Patched Pokemon Box PAL\r\n");
+			dbgprintf("Patch:Patched Pokemon Box PAL (%u extra)\r\n", PatchPokemonBoxVM(0x87148, 0x88FC0));
 		}
 		else if(write32A(0x8682C, 0x3C60A000, 0x3C609000, 0))
 		{
@@ -4204,6 +4202,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 					moved++;
 				}
 			}
+			moved += PatchPokemonBoxVM(0x8682C, 0x8837C + 0x300);
 			dbgprintf("Patch:Patched Pokemon Box NTSC-J (%u extra)\r\n", moved);
 		}
 	}
