@@ -4166,7 +4166,21 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			write32(0x88318, 0x3C6000A0);
 			write32(0x8831C, 0x3C80A000);
 			write32(0x8837C, 0x3CDFA000);
-			dbgprintf("Patch:Patched Pokemon Box NTSC-J\r\n");
+
+			// The US and PAL patches also move the 0x9080, 0x90D0 and 0x90F0
+			// areas (0xBC, 0x17C and 0x238 after the 0x9000 one). Do the same
+			// here, only where the expected instruction is found.
+			u32 k, moved = 0;
+			for(k = 0x8837C + 4; k < 0x8837C + 0x300; k += 4)
+			{
+				u32 op = read32(k);
+				if(op == 0x3CDF9080 || op == 0x3CDF90D0 || op == 0x3CDF90F0) // addis r6,r31,0x90xx
+				{
+					write32(k, op + 0x1000); // -> 0xA0xx
+					moved++;
+				}
+			}
+			dbgprintf("Patch:Patched Pokemon Box NTSC-J (%u extra)\r\n", moved);
 		}
 	}
 	else if( TITLE_ID == 0x47354E )	// Namco Museum 50th
