@@ -350,22 +350,41 @@ void closeLog(void)
 		f_close(&dbgfile);
 	}
 }
+/*
+ * Log text the game wrote with patch_fwrite_Log. The game waits until the
+ * length is cleared. Its address and length are not trusted: a crashing
+ * game can print long or odd text, so check the range and log it as data
+ * in small pieces (dbgprintf formats into a 0x100 byte stack buffer).
+ */
 void CheckOSReport(void)
 {
-	sync_before_read((void*)0x13160000, 0x8);
+	sync_before_read((void*)0x13160000, 0x20);
 
 	u32 Length = read32(0x13160004);
-	if (Length != 0x0)
+	if (Length == 0x0)
+		return;
+
+	u32 Address = read32(0x13160000) & 0x1FFFFFFF; //physical, cached or uncached
+	bool InMEM1 = Address < 0x01800000 && Length <= 0x01800000 - Address;
+	bool InMEM2 = Address >= 0x10000000 && Address < 0x14000000 && Length <= 0x14000000 - Address;
+	if ((InMEM1 || InMEM2) && Length <= 0x10000)
 	{
-		char* Address = (char*)(P2C(read32(0x13160000)));
-		sync_before_read((void*)((u32)(Address) & 0x1FFFFFFC), Length + 4);
-		char* Msg = malloca(Length + 1, 0x20);
-		strncpy(Msg, Address, Length);
-		Msg[Length] = '\0';
-		dbgprintf(Msg);
-		free(Msg);
-		write32(0x13160004, 0);
-		sync_after_write((void*)0x13160004, 0x4);
+		char Chunk[0x81];
+		u32 Done;
+		for (Done = 0; Done < Length; Done += 0x80)
+		{
+			u32 Size = Length - Done;
+			if (Size > 0x80)
+				Size = 0x80;
+			sync_before_read((void*)((Address + Done) & ~0x1F), Size + 0x20);
+			memcpy(Chunk, (void*)(Address + Done), Size);
+			Chunk[Size] = '\0';
+			dbgprintf("%s", Chunk);
+		}
 	}
-	return;
+	else
+		dbgprintf("OSReport: ignored %u bytes at %08X\r\n", Length, Address);
+
+	write32(0x13160004, 0);
+	sync_after_write((void*)0x13160004, 0x4);
 }
