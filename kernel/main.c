@@ -183,6 +183,76 @@ static void PPCDumpText(u32 start, u32 end)
 }
 
 /*
+ * JSystem heaps (JKRExpHeap): blocks start with "HM" (0x484D), size at +4,
+ * prev at +8, next at +0xC. Summarise every list a heap points at.
+ */
+static void PPCDumpHeap(u32 heap)
+{
+	u32 off;
+	PPCDumpWords("heap", heap, 0, 0x28);
+	for (off = 0x60; off < 0xA0; off += 4)
+	{
+		u32 b = PPCRead32(heap + off);
+		if (b == 0xDEADBEEF || (PPCRead32(b) >> 16) != 0x484D)
+			continue;
+		u32 n = 0, total = 0, largest = 0, first = b;
+		while (b != 0 && b != 0xDEADBEEF && n < 5000)
+		{
+			if ((PPCRead32(b) >> 16) != 0x484D)
+			{
+				dbgprintf("PPC:  list +%02X: bad block %08X after %u blocks\r\n", off, b, n);
+				break;
+			}
+			u32 size = PPCRead32(b + 4);
+			total += size;
+			if (size > largest)
+				largest = size;
+			if (n < 6)
+				dbgprintf("PPC:  list +%02X block %08X: %08X %08X %08X %08X\r\n", off, b,
+					PPCRead32(b), size, PPCRead32(b + 8), PPCRead32(b + 12));
+			n++;
+			b = PPCRead32(b + 12);
+		}
+		dbgprintf("PPC:  list +%02X from %08X: %u blocks, total %08X, largest %08X\r\n", off, first, n, total, largest);
+	}
+}
+
+/* Does this look like a JKRHeap: vtable in the dol, sane start/end at +0x30/+0x34 */
+static bool PPCIsHeap(u32 heap)
+{
+	u32 vtable = PPCRead32(heap), start = PPCRead32(heap + 0x30), end = PPCRead32(heap + 0x34);
+	return vtable >= 0x80003100 && vtable < (0x80000000 | DOLMaxOff) &&
+		start >= 0x80000000 && end > start && end <= 0x81800000;
+}
+
+/* Find every heap with the same vtable as a known one and summarise it */
+static void PPCDumpHeaps(u32 known)
+{
+	/* the address seen may be the heap's OSMutex at +0x18 rather than the heap */
+	if (!PPCIsHeap(known))
+		known -= 0x18;
+	if (!PPCIsHeap(known))
+	{
+		dbgprintf("PPC:no heap at %08X or %08X\r\n", known + 0x18, known);
+		PPCDumpWords("near", known, 0, 0x10);
+		return;
+	}
+	u32 vtable = PPCRead32(known), a, found = 0;
+	dbgprintf("PPC:heaps with vtable %08X\r\n", vtable);
+	for (a = 0x80003100; a < 0x81800000 && found < 16; a += 4)
+	{
+		if (a == 0x80003100 || (a & 0xFFFF) == 0)
+			sync_before_read((void*)(a & 0x01FFFFE0), 0x10000);
+		if (read32(a & 0x01FFFFFF) != vtable || !PPCIsHeap(a))
+			continue;
+		u32 start = PPCRead32(a + 0x30), end = PPCRead32(a + 0x34);
+		dbgprintf("PPC:heap %08X start %08X end %08X size %08X\r\n", a, start, end, PPCRead32(a + 0x38));
+		PPCDumpHeap(a);
+		found++;
+	}
+}
+
+/*
  * When the game freezes, the power button still works. Log where the game
  * was so a hang can be located without a debugger (needs Log enabled).
  */
@@ -215,6 +285,9 @@ static void PPCDumpState(void)
 		PPCDumpText(0x80000000 | DOLMaxOff, (0x80000000 | DOLMaxOff) + 0x20000);
 	if (stackBase != 0xDEADBEEF && stackBase > sp && stackBase - sp < 0x10000)
 		PPCDumpText(sp - 0x1000, stackBase);
+	/* Pokemon Box: its JKRExpHeap seen in the List hang */
+	if (read32(0) == 0x47505845)
+		PPCDumpHeaps(0x8057D4B0);
 	/* Nintendont's fake interrupt flags (RSW, DI, SI, EXI, HSP), pending if non-zero */
 	sync_before_read((void*)INT_BASE, 0xA0);
 	for (i = 0; i < 0xA0; i += 0x20)
