@@ -292,7 +292,7 @@ static bool XferHits(u32 dest, u32 len, u32 lo, u32 hi)
 }
 
 /* Log the transfers that wrote near [lo, hi) or happened after since/arSince */
-static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince)
+static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince, u32 now)
 {
 	u32 i, n = XferCount < XFER_LOG_COUNT ? XferCount : XFER_LOG_COUNT;
 	dbgprintf("Xfer:%u disc/card transfers logged, showing near %08X-%08X or recent\r\n", XferCount, lo | 0x80000000, hi | 0x80000000);
@@ -304,7 +304,7 @@ static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince)
 		if (near || recent)
 			dbgprintf("Xfer: #%u %s %08X+%05X ends %08X t-%u ms%s\r\n", i, XferLog[k].type == 'D' ? "disc" : "card",
 				XferLog[k].dest | 0x80000000, XferLog[k].len, (XferLog[k].dest + XferLog[k].len) | 0x80000000,
-				(read32(HW_TIMER) - XferLog[k].time) / 1898, near ? " NEAR" : "");
+				(now - XferLog[k].time) / 1898, near ? " NEAR" : "");
 	}
 	/* ARAM copies: type 1 = ARAM to main memory (writes game memory) */
 	sync_before_read((void*)AR_DMA_LOG, 0x4020);
@@ -349,7 +349,7 @@ static bool HeapReadHeader(u32 b, u32 *magic, u32 *size, u32 *next)
 
 static void HeapCheck(void)
 {
-	static u32 timer = 0, lastGood = 0, arLastGood = 0, suspect = 0, done = 0, announced = 0;
+	static u32 timer = 0, lastGood = 0, arLastGood = 0, suspect = 0, seen = 0, done = 0, announced = 0;
 	const u32 heap = 0x8057D4B0;
 	if (done || read32(0) != 0x47505845 || !ConfigGetConfig(NIN_CFG_LOG))
 		return;
@@ -359,11 +359,20 @@ static void HeapCheck(void)
 	u32 vtable, start, end, b, prev = 0, n = 0, bad = 0;
 	if (!HeapReadHeader(heap, &vtable, &start, &end) || vtable != 0x801EB0E0) //heap not created yet
 		return;
+	/* Only walk the heap while nobody holds its OSMutex (+0x18, owner thread at
+	   +0x20), so a half-finished alloc or free is never mistaken for damage. */
+	u32 unused, lockOwner;
+	HeapReadHeader(heap + 0x14, &unused, &unused, &lockOwner); //third word read is +0x20
+	if (lockOwner != 0)
+		return;
 	HeapReadHeader(heap + 0x30, &start, &end, &b); //+0x30 start, +0x34 end
 	HeapReadHeader(heap + 0x74, &b, &b, &b);        //+0x80 used list head
 
 	if (!announced)
 	{
+		/* start the ARAM request log from zero */
+		memset32((void*)AR_DMA_LOG, 0, 0x4020);
+		sync_after_write((void*)AR_DMA_LOG, 0x4020);
 		dbgprintf("HeapCheck:watching heap %08X (%08X-%08X)\r\n", heap, start, end);
 		announced = 1;
 	}
@@ -388,18 +397,22 @@ static void HeapCheck(void)
 		arLastGood = read32(AR_DMA_LOG);
 		return;
 	}
-	if (bad != suspect) //first sighting, confirm on the next check
+	if (bad != suspect) //first sighting, confirm on the next checks
 	{
 		suspect = bad;
+		seen = 1;
 		return;
 	}
+	if (++seen < 3)
+		return;
 	done = 1;
+	u32 now = read32(HW_TIMER);
 	dbgprintf("HeapCheck:broken block %08X after %u good blocks, previous %08X, last good check %u ms ago\r\n",
 		bad, n, prev, TimerDiffTicks(lastGood) / 1898);
 	if (prev)
 		PPCDumpWords("previous block", prev, 0, 8);
 	PPCDumpWords("around broken block", bad, 8, 8);
-	XferLogReport((bad & 0x01FFFFFF) - 0x200, (bad & 0x01FFFFFF) + 0x20, lastGood, arLastGood);
+	XferLogReport((bad & 0x01FFFFFF) - 0x200, (bad & 0x01FFFFFF) + 0x20, lastGood, arLastGood, now);
 }
 
 /*
