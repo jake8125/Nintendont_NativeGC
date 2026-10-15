@@ -216,8 +216,17 @@ u32 PADRead(u32 calledByGame)
               *HIDMotor = (MotorCommand[0]&0x3);
 		for (chan = 0; (chan < MaxPads); ++chan)
 		{
-			if (chan == GBALinkPhys) //kernel drives this channel
+			if (chan == GBALinkPhys) //kernel drives this channel, the GBA has it
+			{
+				/* no controller here, so USB pads start on this port like
+				   they would on an empty native port */
+				if(HIDPad == HID_PAD_NOT_SET)
+				{
+					*HIDMotor = (MotorCommand[chan]&0x3);
+					HIDPad = chan;
+				}
 				continue;
+			}
 			/* transfer the actual data */
 			u32 x, PADButtonsStick, PADTriggerCStick;
 			u32 addr = 0xCD006400 + (0x0c * chan);
@@ -373,7 +382,10 @@ u32 PADRead(u32 calledByGame)
 	u32 HIDMemPrep = 0;
 	if (HIDPad == HID_PAD_NOT_SET)
 		HIDPad = MaxPads;
-	if (HIDPad == GBALinkPort)
+	/* A single USB pad must not land on the GBA port. Multi-port adapters
+	   (MultiIn 3/4) map adapter port N to game port N, the GBA port's pad
+	   is dropped at the end instead, so don't shift them. */
+	if (HIDPad == GBALinkPort && HID_CTRL->MultiIn != 3 && HID_CTRL->MultiIn != 4)
 		HIDPad++;
 
 	for (chan = HIDPad; (chan < HID_PAD_NONE); (HID_CTRL->MultiIn == 3 || HID_CTRL->MultiIn == 4) ? (++chan) : (chan = HID_PAD_NONE)) // Run once unless MultiIn == 3
@@ -835,7 +847,9 @@ u32 PADRead(u32 calledByGame)
 		}
 	}
 
-	if(MaxPads == 0) //wiiu
+	/* wiiu, or GBA link where MaxPads only counts real ports: Bluetooth
+	   pads may use any free port */
+	if(MaxPads == 0 || GBALinkPort != HID_PAD_NONE)
 		MaxPads = 4;
 
 	for(chan = 0; chan < MaxPads; ++chan)	//bluetooth controller loop
