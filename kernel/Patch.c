@@ -4136,6 +4136,30 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	}
 	else if( TITLE_ID == 0x475058 )	// Pokemon Box
 	{
+		/* Diagnostics for the List screen heap corruption (needs Log):
+		   the original words the patch below replaces, and every place the
+		   game builds a 0x9xxx high constant or touches segment registers,
+		   the page table base or the TLB. */
+		{
+			static const u32 BoxPatchAddr[] = { 0x85E28, 0x879D4, 0x879D8, 0x87A38, 0x87AF4, 0x87BB4, 0x87C70 };
+			u32 k, shown = 0;
+			for (k = 0; k < sizeof(BoxPatchAddr) / sizeof(BoxPatchAddr[0]); k++)
+				dbgprintf("Box:original %08X: %08X\r\n", BoxPatchAddr[k], read32(BoxPatchAddr[k]));
+			for (k = DOLMinOff & ~3; k < DOLMaxOff && shown < 96; k += 4)
+			{
+				u32 op = read32(k);
+				bool hi9 = (op & 0xFC000000) == 0x3C000000 && ((op >> 12) & 0xF) == 0x9 && (op & 0xFFFF) < 0xA000;
+				bool sr = (op & 0xFC0007FE) == 0x7C0001A4 || (op & 0xFC0007FE) == 0x7C0001E4 || // mtsr, mtsrin
+					(op & 0xFC0007FE) == 0x7C0004A6 || (op & 0xFC0007FE) == 0x7C000526;      // mfsr, mfsrin
+				bool sdr1 = (op & 0xFC1FFFFE) == 0x7C1903A6 || (op & 0xFC1FFFFE) == 0x7C1902A6; // mtsdr1, mfsdr1
+				bool tlb = (op & 0xFC0007FE) == 0x7C000264 || (op & 0xFC0007FE) == 0x7C00046C;  // tlbie, tlbsync
+				if (hi9 || sr || sdr1 || tlb)
+				{
+					dbgprintf("Box:code %08X: %08X\r\n", k | 0x80000000, op);
+					shown++;
+				}
+			}
+		}
 		// SuSo: Change PTE address to A0000000
 		if(write32A(0x85E28, 0x3C60A000, 0x3C609000, 0))
 		{
