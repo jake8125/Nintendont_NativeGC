@@ -200,6 +200,10 @@ void SIInterrupt()
 	//	return;
 	if (SI_IRQ & 0x1)
 	{
+		/* Re-read it, the game may have started a transfer since
+		   SIUpdateRegisters; writing back that older copy would drop it */
+		sync_before_read((void*)SI_CONTROL, 0x4);
+		cur_control = read32(SI_CONTROL);
 		if (complete)
 		{
 			cur_control &= ~(1<<28); //no read interrupt requested anymore, completed transfer
