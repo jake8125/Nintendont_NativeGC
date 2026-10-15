@@ -73,6 +73,7 @@ bool wiiVCInternal = false;
 bool isWidescreen = false;
 
 /* Read a word of game memory from a PPC (MEM1) address, 0xDEADBEEF if invalid */
+extern u32 DOLMaxOff;
 static u32 PPCRead32(u32 addr)
 {
 	if (addr < 0x80000000 || (addr & 0x7FFFFFFF) >= 0x01800000 || (addr & 3))
@@ -120,6 +121,68 @@ static void PPCDumpContext(const char *name, u32 ctx)
 }
 
 /*
+ * List real return addresses in [start, end): words pointing right after a
+ * bl or bctrl/blrl inside the game's code, with the call's target.
+ */
+static void PPCDumpReturns(u32 start, u32 end)
+{
+	u32 a, shown = 0;
+	u32 codeEnd = 0x80400000; //generous, the call check below filters data
+	dbgprintf("PPC:return addresses %08X-%08X\r\n", start, end);
+	for (a = start & ~3; a < end && shown < 48; a += 4)
+	{
+		u32 ret = PPCRead32(a);
+		if (ret < 0x80003104 || ret >= codeEnd || (ret & 3))
+			continue;
+		u32 call = PPCRead32(ret - 4);
+		if ((call & 0xFC000003) == 0x48000001) //bl
+		{
+			u32 off = call & 0x03FFFFFC;
+			if (off & 0x02000000)
+				off |= 0xFC000000;
+			dbgprintf("PPC: %08X: ret %08X bl %08X\r\n", a, ret, ret - 4 + off);
+			shown++;
+		}
+		else if (call == 0x4E800421 || call == 0x4E800021) //bctrl, blrl
+		{
+			dbgprintf("PPC: %08X: ret %08X %s\r\n", a, ret, call == 0x4E800421 ? "bctrl" : "blrl");
+			shown++;
+		}
+	}
+}
+
+/* Printable text runs (16+ chars) in [start, end), newlines shown as | */
+static void PPCDumpText(u32 start, u32 end)
+{
+	u32 a, run = 0, runStart = 0, shown = 0;
+	char line[0x61];
+	dbgprintf("PPC:text %08X-%08X\r\n", start, end);
+	for (a = start; a < end && shown < 40; a++)
+	{
+		u8 c = PPCRead32(a & ~3) >> (24 - 8 * (a & 3));
+		if ((c >= 0x20 && c < 0x7F) || c == '\n')
+		{
+			if (run++ == 0)
+				runStart = a;
+			continue;
+		}
+		if (run >= 16)
+		{
+			u32 i, n = run < 0x60 ? run : 0x60;
+			for (i = 0; i < n; i++)
+			{
+				u8 t = PPCRead32((runStart + i) & ~3) >> (24 - 8 * ((runStart + i) & 3));
+				line[i] = (t == '\n') ? '|' : (t == '%' ? '?' : t);
+			}
+			line[n] = 0;
+			dbgprintf("PPC: %08X: %s\r\n", runStart, line);
+			shown++;
+		}
+		run = 0;
+	}
+}
+
+/*
  * When the game freezes, the power button still works. Log where the game
  * was so a hang can be located without a debugger (needs Log enabled).
  */
@@ -134,6 +197,24 @@ static void PPCDumpState(void)
 	PPCDumpContext("current", cur);
 	if (thread != cur)
 		PPCDumpContext("thread", thread);
+	/* OSThread: stackBase at 0x304 (top), stackEnd at 0x308 */
+	u32 sp = PPCRead32(cur + 4), stackBase = PPCRead32(thread + 0x304);
+	if (stackBase != 0xDEADBEEF && stackBase > sp && stackBase - sp < 0x10000)
+		PPCDumpReturns(sp - 0x400, stackBase);
+	/* Other threads in the active queue (head 0xDC, tail 0xE0) */
+	u32 other = PPCRead32(0x800000E0);
+	if (other != thread && other != 0xDEADBEEF)
+	{
+		PPCDumpContext("other thread", other);
+		u32 osp = PPCRead32(other + 4), obase = PPCRead32(other + 0x304);
+		if (obase != 0xDEADBEEF && obase > osp && obase - osp < 0x10000)
+			PPCDumpReturns(osp - 0x100, obase);
+	}
+	/* Panic and assert messages are formatted in .bss (right after the dol) or on the stack */
+	if (DOLMaxOff)
+		PPCDumpText(0x80000000 | DOLMaxOff, (0x80000000 | DOLMaxOff) + 0x20000);
+	if (stackBase != 0xDEADBEEF && stackBase > sp && stackBase - sp < 0x10000)
+		PPCDumpText(sp - 0x1000, stackBase);
 	/* Nintendont's fake interrupt flags (RSW, DI, SI, EXI, HSP), pending if non-zero */
 	sync_before_read((void*)INT_BASE, 0xA0);
 	for (i = 0; i < 0xA0; i += 0x20)
