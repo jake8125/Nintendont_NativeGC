@@ -82,7 +82,6 @@ u32 ELFLoading = 0;
 u32 DOLSize    = 0;
 u32 DOLMinOff  = 0;
 u32 DOLMaxOff  = 0;
-u32 DOLBssEnd  = 0; //end of the dol's bss, 0 if unknown
 vu32 TRI_BackupAvailable = 0;
 vu32 GameEntry = 0, FirstLine = 0;
 u32 AppLoaderSize = 0;
@@ -522,44 +521,19 @@ static void Patch31A0( void )
 /*
  * Pokemon Box keeps one of its heaps in 0x80001800-0x80003000, where the
  * patches normally go, and writes over them once it fills up (opening the
- * List screen), so the next DSP interrupt runs its data as code. For Box the
- * patches go to the far end of the main thread's stack instead, which the
- * game never comes close to using. The stack starts right after everything
- * the dol loads or clears (its text, data and bss); its top is what the
- * game's startup code loads into r1. Only done if that stack is big enough.
+ * List screen), so the next DSP interrupt runs its data as code. Nothing
+ * after the dol is free either: the game clears its bss and its whole stack
+ * at startup. So for Box the patches go near the top of MEM1, below the bi2
+ * (0x817FDC40) and FST (0x817FFC40) the apploader put there, and
+ * FakeEntryLoad lowers the game's arena (BootInfo arenaHi, read by OSInit)
+ * to end below them.
  */
-#define BOX_PATCH_SPACE 0x1000
+#define BOX_ARENA_HI	0x017FB000
+#define BOX_PATCH_TOP	0x017FC000
 static u32 BoxPatchTopAddr = 0; //0: patches stay in low memory
-static u32 FindStackTop(void)
-{
-	u32 a;
-	for (a = 0x3100; a < 0x3800; a += 4)
-	{
-		u32 op = read32(a), op2 = read32(a + 4);
-		if ((op & 0xFFFF0000) == 0x3C200000) //lis r1, hi
-		{
-			if ((op2 & 0xFFFF0000) == 0x60210000) //ori r1, r1, lo
-				return ((op & 0xFFFF) << 16) | (op2 & 0xFFFF);
-			if ((op2 & 0xFFFF0000) == 0x38210000) //addi r1, r1, lo
-				return ((op & 0xFFFF) << 16) + (s16)(op2 & 0xFFFF);
-		}
-	}
-	return 0;
-}
 static void BoxPlacePatches(void)
 {
-	BoxPatchTopAddr = 0;
-	if (TITLE_ID != 0x475058)
-		return;
-	u32 stackEnd = ((DOLBssEnd > DOLMaxOff ? DOLBssEnd : DOLMaxOff) + 0x1F) & ~0x1F;
-	u32 stackTop = FindStackTop() & 0x01FFFFFF;
-	dbgprintf("Patch:Pokemon Box, dol and bss end 0x%08X, stack top 0x%08X\r\n", stackEnd | 0x80000000, stackTop | 0x80000000);
-	if (stackTop <= stackEnd || stackTop - stackEnd < 0x8000)
-	{
-		dbgprintf("Patch:Pokemon Box, no room for the patches in the stack, leaving them in low memory\r\n");
-		return;
-	}
-	BoxPatchTopAddr = stackEnd + 0x100 + BOX_PATCH_SPACE;
+	BoxPatchTopAddr = (TITLE_ID == 0x475058) ? BOX_PATCH_TOP : 0;
 }
 static bool BoxLowHeap(void)
 {
@@ -1373,7 +1347,6 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 
 				DOLMinOff -= 0x80000000;
 				DOLMaxOff -= 0x80000000;
-				DOLBssEnd = dol->sizeBSS ? dol->addressBSS + dol->sizeBSS - 0x80000000 : 0;
 				dbgprintf("DIP:DOL BSS:0x%08X Size:0x%X\r\n", dol->addressBSS, dol->sizeBSS);
 
 				//if (PSOHack == PSO_STATE_LOAD)
@@ -4695,16 +4668,20 @@ void PatchGame()
 	Patch31A0();
 	PatchAreaLo = POffset;
 	PatchAreaHi = BoxLowHeap() ? BoxPatchTop() : PATCH_OFFSET_START;
+	/* FakeEntryLoad: optional extra range to invalidate and arena end */
+	write32(RESET_STATUS + 0xC, 0);
+	write32(RESET_STATUS + 0x10, 0);
+	write32(RESET_STATUS + 0x14, 0);
 	if (BoxLowHeap())
 	{
-		/* patches after the dol: write them back, and have FakeEntryLoad
-		   invalidate them on the game CPU along with the dol */
+		write32(RESET_STATUS + 0xC, (PatchAreaLo & ~0x1F) | 0x80000000);
+		write32(RESET_STATUS + 0x10, (PatchAreaHi - (PatchAreaLo & ~0x1F) + 0x1F) >> 5);
+		write32(RESET_STATUS + 0x14, BOX_ARENA_HI | 0x80000000);
 		sync_after_write((void*)(PatchAreaLo & ~0x1F), PatchAreaHi - (PatchAreaLo & ~0x1F));
-		FullLength = (PatchAreaHi - DOLMinOff + 31) & (~31);
-		dbgprintf("Patch:Pokemon Box, patches moved out of its low memory heap to 0x%08X-0x%08X\r\n",
-			PatchAreaLo | 0x80000000, PatchAreaHi | 0x80000000);
-		if (PatchAreaLo < DOLMaxOff + 0x400)
-			dbgprintf("Patch:WARNING patches reach within 0x400 of the stack end\r\n");
+		dbgprintf("Patch:Pokemon Box, patches moved out of its low memory heap to 0x%08X-0x%08X, game memory ends at 0x%08X\r\n",
+			PatchAreaLo | 0x80000000, PatchAreaHi | 0x80000000, BOX_ARENA_HI | 0x80000000);
+		if (PatchAreaLo < BOX_ARENA_HI)
+			dbgprintf("Patch:WARNING patches run below the game's memory end\r\n");
 	}
 	write32( FLUSH_LEN, FullLength >> 5 );
 	u32 Command2 = DOLMinOff;
