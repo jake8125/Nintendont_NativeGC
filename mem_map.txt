@@ -37,7 +37,6 @@ MEM2
 0x93003130-0x93003190=pad barrel stuff
 0x930031a0-0x930031c0=ARStartDMA Debug str
 0x930031C0-0x930031C4=GBA link port SI type (kernel writes, SIGetType reads)
-0x930031C4-0x930031C8=Pokemon Box heap check routine, called by PADReadGC if set (diagnostics)
 
 0x930031E0-0x93003200=tgc dol header
 
@@ -65,7 +64,7 @@ MEM2
 0x93060000-0x93100000=IOS Interface Data Buffers
 0x93100000-0x93150000=ipl fonts buffer (0x1aff00-0x1fff00)
 0x93150000-0x93154010=ARStartDMA request log (count, 1024 x 16 byte entries)
-0x93154100-0x93154180=Pokemon Box heap check report (diagnostics)
+0x93154180-0x93154184=data cache flush request (kernel sets 1, PADReadGC flushes MEM1 and sets 2)
 0x93160000-0x93160008=OSReport (patch_fwrite)
 0x931C0000=PSO PRS dol location
 0x931C0020=PSO PRS extract function location

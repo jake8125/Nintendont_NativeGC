@@ -111,12 +111,16 @@ u32 PADRead(u32 calledByGame)
 	u32 cfg = ((NIN_CFG*)0x93004000)->Config;
 	u32 GBALinkPort = (calledByGame && (cfg & NIN_CFG_GBA_LINK)) ? NIN_CFG_GBA_PORT(cfg) : HID_PAD_NONE;
 	u32 GBALinkPhys = (GBALinkPort != HID_PAD_NONE) ? NIN_CFG_GBA_PHYS(cfg) : HID_PAD_NONE;
-	/* Pokemon Box heap watch (diagnostics), placed by the kernel */
-	if (calledByGame)
+	/* Freeze diagnostics: the kernel asks for this before it dumps game
+	   memory, so it doesn't read stale data from behind our data cache */
+	vu32 *FlushRequest = (vu32*)0xD3154180;
+	if (calledByGame && *FlushRequest == 1)
 	{
-		void (*BoxHeapCheck)(void) = *(void (* volatile *)(void))0xD30031C4;
-		if (BoxHeapCheck)
-			BoxHeapCheck();
+		u32 line;
+		for (line = 0x80000000; line < 0x81800000; line += 32)
+			asm volatile("dcbst 0,%0" : : "r"(line) : "memory");
+		asm volatile("sync");
+		*FlushRequest = 2;
 	}
 	u32 HIDPad = (*HID_STATUS == 0) ? HID_PAD_NONE : HID_PAD_NOT_SET;
 	u32 chan;

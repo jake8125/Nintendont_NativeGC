@@ -186,6 +186,7 @@ static void PPCDumpText(u32 start, u32 end)
  * JSystem heaps (JKRExpHeap): blocks start with "HM" (0x484D), size at +4,
  * prev at +8, next at +0xC. Summarise every list a heap points at.
  */
+static u32 PPCBadBlock = 0; //first broken block found by PPCDumpHeap
 static void PPCDumpHeap(u32 heap)
 {
 	u32 off, start = PPCRead32(heap + 0x30), end = PPCRead32(heap + 0x34);
@@ -205,6 +206,8 @@ static void PPCDumpHeap(u32 heap)
 			if (b < start || b >= end || (b & 3) || size > end - b)
 			{
 				dbgprintf("PPC:  list +%02X: bad block %08X after %u blocks, previous %08X\r\n", off, b, n, prev);
+				if (!PPCBadBlock)
+					PPCBadBlock = b;
 				if (prev)
 					PPCDumpWords("  previous block", prev, 0, 8);
 				PPCDumpWords("  around bad block", b, 16, 16);
@@ -212,6 +215,8 @@ static void PPCDumpHeap(u32 heap)
 			}
 			if ((PPCRead32(b) >> 16) != 0x484D)
 			{
+				if (!PPCBadBlock && off == 0x80) //used blocks all carry it
+					PPCBadBlock = b;
 				if (nomagic < 4)
 					PPCDumpWords("  block without HM", b, 4, 8);
 				nomagic++;
@@ -323,45 +328,36 @@ static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince, u32 now)
 }
 
 /*
- * Pokemon Box heap watch. The kernel cannot check the game's heap itself:
- * the game CPU's data cache is write-back, so main memory can hold stale
- * headers for a long time. PADReadGC walks the heap on the game CPU instead
- * and leaves its result here; this logs it with the transfers that could
- * have written the broken header.
+ * Game memory as the kernel reads it can be stale: the game CPU's data cache
+ * is write-back. Before dumping, ask the game CPU to write its cache back
+ * (PADReadGC does that on its next call). The main loop keeps running while
+ * we wait, since it drives the interrupts the game may need to get there.
+ * Returns true once the dump can go ahead.
  */
-#define BOX_HEAP_REPORT 0x13154100
-static void BoxHeapReport(void)
+#define PPC_FLUSH_REQUEST 0x13154180
+static bool PPCFlushReady(void)
 {
-	static u32 timer = 0, lastCount = 0, lastGood = 0, arLastGood = 0, done = 0;
-	if (done || read32(0) != 0x47505845 || !ConfigGetConfig(NIN_CFG_LOG))
-		return;
-	if (timer && TimerDiffTicks(timer) < 18982) //~10ms
-		return;
-	timer = read32(HW_TIMER);
-	sync_before_read((void*)BOX_HEAP_REPORT, 0x80);
-	u32 count = read32(BOX_HEAP_REPORT);
-	if (count != lastCount)
+	static u32 start = 0;
+	if (!ConfigGetConfig(NIN_CFG_LOG))
+		return true;
+	if (start == 0)
 	{
-		if (lastCount == 0)
-			dbgprintf("HeapCheck:game CPU is checking heap 8057D4B0\r\n");
-		lastCount = count;
-		lastGood = timer;
-		sync_before_read((void*)AR_DMA_LOG, 0x20);
-		arLastGood = read32(AR_DMA_LOG);
+		write32(PPC_FLUSH_REQUEST, 1);
+		sync_after_write((void*)PPC_FLUSH_REQUEST, 0x20);
+		start = read32(HW_TIMER) | 1;
+		return false;
 	}
-	if (read32(BOX_HEAP_REPORT + 4) == 0)
-		return;
-	done = 1;
-	u32 i, bad = read32(BOX_HEAP_REPORT + 8), prev = read32(BOX_HEAP_REPORT + 0xC);
-	dbgprintf("HeapCheck:%s list broken at %08X, block %u, previous %08X, tail %08X, after %u good checks, last %u ms ago\r\n",
-		read32(BOX_HEAP_REPORT + 0x18) == 0x80 ? "used" : "free", bad, 0x10000 - read32(BOX_HEAP_REPORT + 0x10), prev,
-		read32(BOX_HEAP_REPORT + 0x14), count, TimerDiffTicks(lastGood) / 1898);
-	/* as the game CPU saw them: 0x20 bytes at the previous block, 0x40 around the broken one */
-	for (i = 0x20; i < 0x80; i += 0x10)
-		dbgprintf("HeapCheck: %08X: %08X %08X %08X %08X\r\n", (i < 0x40 ? prev - 0x20 : bad - 0x60) + i,
-			read32(BOX_HEAP_REPORT + i), read32(BOX_HEAP_REPORT + i + 4),
-			read32(BOX_HEAP_REPORT + i + 8), read32(BOX_HEAP_REPORT + i + 12));
-	XferLogReport((bad & 0x01FFFFFF) - 0x200, (bad & 0x01FFFFFF) + 0x20, lastGood, arLastGood, read32(HW_TIMER));
+	sync_before_read((void*)PPC_FLUSH_REQUEST, 0x20);
+	if (read32(PPC_FLUSH_REQUEST) == 2)
+	{
+		dbgprintf("PPC:game CPU wrote back its data cache after %u ms, memory below is current\r\n",
+			TimerDiffTicks(start) / 1898);
+		return true;
+	}
+	if (TimerDiffTicks(start) < 1898 * 1000)
+		return false;
+	dbgprintf("PPC:game CPU did not write back its data cache within 1 s (not reading controllers), memory below may be stale\r\n");
+	return true;
 }
 
 /*
@@ -397,14 +393,17 @@ static void PPCDumpState(void)
 		PPCDumpText(0x80000000 | DOLMaxOff, (0x80000000 | DOLMaxOff) + 0x20000);
 	if (stackBase != 0xDEADBEEF && stackBase > sp && stackBase - sp < 0x10000)
 		PPCDumpText(sp - 0x1000, stackBase);
-	/* Pokemon Box: its JKRExpHeap seen in the List hang. This is main memory
-	   as the kernel sees it, which can miss the game CPU's cached writes. */
+	/* Pokemon Box: its JKRExpHeap seen in the List hang, and the transfers
+	   that could have written the first broken block found in it */
 	if (read32(0) == 0x47505845)
 	{
-		sync_before_read((void*)BOX_HEAP_REPORT, 0x20);
-		dbgprintf("HeapCheck:%u clean checks by the game CPU, found %u\r\n",
-			read32(BOX_HEAP_REPORT), read32(BOX_HEAP_REPORT + 4));
 		PPCDumpHeaps(0x8057D4B0);
+		if (PPCBadBlock)
+		{
+			u32 now = read32(HW_TIMER), bad = PPCBadBlock & 0x01FFFFFF;
+			sync_before_read((void*)AR_DMA_LOG, 0x20);
+			XferLogReport(bad - 0x200, bad + 0x20, now - 1898 * 2000, read32(AR_DMA_LOG) - 32, now);
+		}
 	}
 	/* Nintendont's fake interrupt flags (RSW, DI, SI, EXI, HSP), pending if non-zero */
 	sync_before_read((void*)INT_BASE, 0xA0);
@@ -573,10 +572,7 @@ int _main( int argc, char *argv[] )
 	sync_after_write((void*)0x13003100, 0x30);
 	memset32((void*)0x13160000, 0, 0x20);
 	sync_after_write((void*)0x13160000, 0x20);
-	/* Pokemon Box heap watch: no check routine until DoPatches places one */
-	write32(0x130031C4, 0);
-	sync_after_write((void*)0x130031C0, 0x20);
-	/* ARAM request log and Pokemon Box heap report, see BoxHeapReport */
+	/* ARAM request log and cache flush request, see PPCFlushReady */
 	memset32((void*)AR_DMA_LOG, 0, 0x4200);
 	sync_after_write((void*)AR_DMA_LOG, 0x4200);
 
@@ -678,6 +674,7 @@ int _main( int argc, char *argv[] )
 			write32(0xd8006a0, 0x30000002), mask32(0xd8006a8, 0, 2);
 	}
 
+	bool ShutdownRequested = false; //power pressed, dump once the game CPU flushed
 	while (1)
 	{
 		_ahbMemFlush(0);
@@ -799,7 +796,6 @@ int _main( int argc, char *argv[] )
 		}
 		StreamUpdateRegisters();
 		CheckOSReport();
-		BoxHeapReport();
 		if(GCNCard_CheckChanges())
 		{
 			Now = read32(HW_TIMER);
@@ -855,6 +851,8 @@ int _main( int argc, char *argv[] )
 			sync_after_write((void*)RESET_STATUS, 0x20);
 		}
 		if(reset_status == 0x7DEA || (read32(HW_GPIO_IN) & GPIO_POWER))
+			ShutdownRequested = true;
+		if(ShutdownRequested && PPCFlushReady())
 		{
 			PPCDumpState();
 			DIFinishAsync();
