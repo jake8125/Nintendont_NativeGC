@@ -374,34 +374,34 @@ static bool PPCFlushReady(void)
 }
 
 /*
- * Compare Nintendont's low memory patches (0x80001800-0x80003000) with the
- * copy taken when the game started (Patch.c, PatchGame), and list what the
- * game changed. Some of it is data the patches update, anything else means
- * the game wrote over our code.
+ * Compare game memory [lo, hi) with the copy at snap taken when the game
+ * started (Patch.c, PatchGame) and list what changed. In low memory some of
+ * it is data the patches update; changes to patch code mean the game wrote
+ * over it.
  */
-static void PPCDumpPatchChanges(void)
+extern u32 PatchAreaLo, PatchAreaHi;
+static void PPCDumpChanges(const char *name, u32 lo, u32 hi, u32 snap)
 {
 	u32 a, runStart = 0, runEnd = 0, runs = 0;
-	sync_before_read((void*)0x1800, 0x1800);
-	sync_before_read((void*)0x13155800, 0x1800);
-	dbgprintf("PPC:low memory patch changes since the game started:\r\n");
-	for (a = 0x1800; a <= 0x3000; a += 4)
+	lo &= ~3;
+	sync_before_read((void*)(lo & ~0x1F), hi - (lo & ~0x1F) + 0x20);
+	sync_before_read((void*)snap, hi - lo + 0x20);
+	dbgprintf("PPC:%s %08X-%08X, changes since the game started:\r\n", name, lo | 0x80000000, hi | 0x80000000);
+	for (a = lo; a <= hi; a += 4)
 	{
-		bool changed = a < 0x3000 && read32(a) != read32(a - 0x1000 + 0x13155000);
+		bool changed = a < hi && read32(a) != read32(snap + a - lo);
 		if (changed && runEnd && a - runEnd < 0x20)
 		{
 			runEnd = a + 4; //merge nearby changes
 			continue;
 		}
-		if ((changed || a == 0x3000) && runEnd)
+		if ((changed || a == hi) && runEnd)
 		{
 			if (runs++ < 24)
-			{
 				dbgprintf("PPC:  %08X-%08X changed, was %08X %08X, now %08X %08X\r\n",
 					runStart | 0x80000000, runEnd | 0x80000000,
-					read32(runStart - 0x1000 + 0x13155000), read32(runStart + 4 - 0x1000 + 0x13155000),
+					read32(snap + runStart - lo), read32(snap + runStart + 4 - lo),
 					read32(runStart), read32(runStart + 4));
-			}
 			runEnd = 0;
 		}
 		if (changed)
@@ -411,6 +411,13 @@ static void PPCDumpPatchChanges(void)
 		}
 	}
 	dbgprintf("PPC:  %u changed areas\r\n", runs);
+}
+
+static void PPCDumpPatchChanges(void)
+{
+	PPCDumpChanges("low memory", 0x1800, 0x3000, 0x13155800);
+	if (PatchAreaHi > 0x3000 && PatchAreaHi - PatchAreaLo <= 0x1000)
+		PPCDumpChanges("patch code", PatchAreaLo, PatchAreaHi, 0x13157000);
 }
 
 /*

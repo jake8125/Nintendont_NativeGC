@@ -518,6 +518,25 @@ static void Patch31A0( void )
 	PatchB(0x31A4, PatchOffset);
 }
 
+/*
+ * Pokemon Box keeps one of its heaps in 0x80001800-0x80003000, where the
+ * patches normally go, and writes over them once it fills up (opening the
+ * List screen), so the next DSP interrupt runs its data as code. For Box the
+ * patches go right after the dol instead: the far end of the main thread's
+ * 64KB stack (it starts 0x10 bytes after the dol), which the game never
+ * comes close to using.
+ */
+#define BOX_PATCH_SPACE 0x1000
+static bool BoxLowHeap(void)
+{
+	return TITLE_ID == 0x475058;
+}
+static u32 BoxPatchTop(void)
+{
+	return (DOLMaxOff + BOX_PATCH_SPACE) & ~0x1F;
+}
+u32 PatchAreaLo = 0, PatchAreaHi = 0; //for the freeze dump in main.c
+
 u32 PatchCopy(const u8 *PatchPtr, const u32 PatchSize)
 {
 	POffset -= PatchSize;
@@ -1499,7 +1518,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	sync_before_read(Buffer, Length);
 
 	/* Have gc patches loaded at the same place for reloading games */
-	POffset = PATCH_OFFSET_ENTRY;
+	POffset = BoxLowHeap() ? BoxPatchTop() : PATCH_OFFSET_ENTRY;
 
 	/* Most important patch, needed for every game read activity */
 	u32 __DVDInterruptHandlerAddr = PatchCopy(__DVDInterruptHandler, __DVDInterruptHandler_size);
@@ -4637,6 +4656,19 @@ void PatchGame()
 	sync_after_write((void*)0x131C0040, 0x20);
 	/* Secure Low Mem */
 	Patch31A0();
+	PatchAreaLo = POffset;
+	PatchAreaHi = BoxLowHeap() ? BoxPatchTop() : PATCH_OFFSET_START;
+	if (BoxLowHeap())
+	{
+		/* patches after the dol: write them back, and have FakeEntryLoad
+		   invalidate them on the game CPU along with the dol */
+		sync_after_write((void*)(PatchAreaLo & ~0x1F), PatchAreaHi - (PatchAreaLo & ~0x1F));
+		FullLength = (PatchAreaHi - DOLMinOff + 31) & (~31);
+		dbgprintf("Patch:Pokemon Box, patches moved out of its low memory heap to 0x%08X-0x%08X\r\n",
+			PatchAreaLo | 0x80000000, PatchAreaHi | 0x80000000);
+		if (PatchAreaLo < DOLMaxOff + 0x400)
+			dbgprintf("Patch:WARNING patches reach within 0x400 of the stack end\r\n");
+	}
 	write32( FLUSH_LEN, FullLength >> 5 );
 	u32 Command2 = DOLMinOff;
 	// ToDo.  HACK: Why doesn't Nightfire Deep Descent level like this??
@@ -4649,9 +4681,14 @@ void PatchGame()
 	   power off can tell whether the game wrote over them */
 	if (ConfigGetConfig(NIN_CFG_LOG))
 	{
-		dbgprintf("Patch:low memory patches at 0x%08X-0x%08X\r\n", POffset | 0x80000000, PATCH_OFFSET_START | 0x80000000);
+		dbgprintf("Patch:patches at 0x%08X-0x%08X\r\n", PatchAreaLo | 0x80000000, PatchAreaHi | 0x80000000);
 		memcpy((void*)0x13155000, (void*)0x1000, 0x2000);
 		sync_after_write((void*)0x13155000, 0x2000);
+		if (PatchAreaHi > 0x3000 && PatchAreaHi - PatchAreaLo <= 0x1000)
+		{
+			memcpy((void*)0x13157000, (void*)PatchAreaLo, PatchAreaHi - PatchAreaLo);
+			sync_after_write((void*)0x13157000, 0x1000);
+		}
 	}
 	write32( RESET_STATUS, GameEntry );
 	sync_after_write((void*)RESET_STATUS, 0x20);
