@@ -1521,7 +1521,11 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			if (read32(p) == 0x7C0004AC && read32(p + 4) == 0x60000000 && read32(p + 8) == 0x38600000 &&
 				read32(p + 12) == 0x60000000 && read32(p + 16) == 0x4BFFFFF4)
 			{
-				PatchB(PatchCopy(PPCHaltHook, PPCHaltHook_size), p);
+				/* in MEM2: the game may write over low memory, and the hook
+				   writes back MEM1, which could put stale data over itself */
+				memcpy((void*)0x13154200, PPCHaltHook, PPCHaltHook_size);
+				sync_after_write((void*)0x13154200, PPCHaltHook_size);
+				PatchJmpToMEM2(0x13154200, p);
 				dbgprintf("Patch:[PPCHalt] hooked (0x%08X)\r\n", p);
 				break;
 			}
@@ -4641,6 +4645,14 @@ void PatchGame()
 	write32( FLUSH_ADDR, Command2 );
 	dbgprintf("Jumping to 0x%08X\n", GameEntry);
 	sync_after_write((void*)0x1000, 0x2000); //low patches
+	/* Freeze diagnostics: keep a copy of the low patches, so the dump on
+	   power off can tell whether the game wrote over them */
+	if (ConfigGetConfig(NIN_CFG_LOG))
+	{
+		dbgprintf("Patch:low memory patches at 0x%08X-0x%08X\r\n", POffset | 0x80000000, PATCH_OFFSET_START | 0x80000000);
+		memcpy((void*)0x13155000, (void*)0x1000, 0x2000);
+		sync_after_write((void*)0x13155000, 0x2000);
+	}
 	write32( RESET_STATUS, GameEntry );
 	sync_after_write((void*)RESET_STATUS, 0x20);
 	// single rel patch required for some games

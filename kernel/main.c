@@ -335,11 +335,24 @@ static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince, u32 now)
  * Returns true once the dump can go ahead.
  */
 #define PPC_FLUSH_REQUEST 0x13154180
+#define PPC_HALT_RECORD 0x131541A0 //written by PPCHaltHook.S, own cache line
+static bool PPCHalted(void)
+{
+	sync_before_read((void*)PPC_HALT_RECORD, 0x20);
+	return read32(PPC_HALT_RECORD) == 0x48414C54; //'HALT'
+}
+
 static bool PPCFlushReady(void)
 {
 	static u32 start = 0;
 	if (!ConfigGetConfig(NIN_CFG_LOG))
 		return true;
+	if (PPCHalted())
+	{
+		dbgprintf("PPC:game CPU halted on purpose (PPCHalt called from %08X, sp %08X) and wrote back its data cache, memory below is current\r\n",
+			read32(PPC_HALT_RECORD + 4), read32(PPC_HALT_RECORD + 8));
+		return true;
+	}
 	if (start == 0)
 	{
 		write32(PPC_FLUSH_REQUEST, 1);
@@ -348,12 +361,6 @@ static bool PPCFlushReady(void)
 		return false;
 	}
 	sync_before_read((void*)PPC_FLUSH_REQUEST, 0x20);
-	if (read32(PPC_FLUSH_REQUEST + 4) == 0x48414C54) //'HALT', see PPCHaltHook.S
-	{
-		dbgprintf("PPC:game CPU halted on purpose (PPCHalt called from %08X, sp %08X) and wrote back its data cache, memory below is current\r\n",
-			read32(PPC_FLUSH_REQUEST + 8), read32(PPC_FLUSH_REQUEST + 12));
-		return true;
-	}
 	if (read32(PPC_FLUSH_REQUEST) == 2)
 	{
 		dbgprintf("PPC:game CPU wrote back its data cache after %u ms, memory below is current\r\n",
@@ -367,6 +374,46 @@ static bool PPCFlushReady(void)
 }
 
 /*
+ * Compare Nintendont's low memory patches (0x80001800-0x80003000) with the
+ * copy taken when the game started (Patch.c, PatchGame), and list what the
+ * game changed. Some of it is data the patches update, anything else means
+ * the game wrote over our code.
+ */
+static void PPCDumpPatchChanges(void)
+{
+	u32 a, runStart = 0, runEnd = 0, runs = 0;
+	sync_before_read((void*)0x1800, 0x1800);
+	sync_before_read((void*)0x13155800, 0x1800);
+	dbgprintf("PPC:low memory patch changes since the game started:\r\n");
+	for (a = 0x1800; a <= 0x3000; a += 4)
+	{
+		bool changed = a < 0x3000 && read32(a) != read32(a - 0x1000 + 0x13155000);
+		if (changed && runEnd && a - runEnd < 0x20)
+		{
+			runEnd = a + 4; //merge nearby changes
+			continue;
+		}
+		if ((changed || a == 0x3000) && runEnd)
+		{
+			if (runs++ < 24)
+			{
+				dbgprintf("PPC:  %08X-%08X changed, was %08X %08X, now %08X %08X\r\n",
+					runStart | 0x80000000, runEnd | 0x80000000,
+					read32(runStart - 0x1000 + 0x13155000), read32(runStart + 4 - 0x1000 + 0x13155000),
+					read32(runStart), read32(runStart + 4));
+			}
+			runEnd = 0;
+		}
+		if (changed)
+		{
+			runStart = a;
+			runEnd = a + 4;
+		}
+	}
+	dbgprintf("PPC:  %u changed areas\r\n", runs);
+}
+
+/*
  * When the game freezes, the power button still works. Log where the game
  * was so a hang can be located without a debugger (needs Log enabled).
  */
@@ -377,15 +424,15 @@ static void PPCDumpState(void)
 	dbgprintf("PPC:State at shutdown\r\n");
 	/* Halted through PPCHalt: the halting code's own stack, with its callers
 	   and any panic message on it */
-	sync_before_read((void*)PPC_FLUSH_REQUEST, 0x20);
-	if (read32(PPC_FLUSH_REQUEST + 4) == 0x48414C54)
+	if (PPCHalted())
 	{
-		u32 hsp = read32(PPC_FLUSH_REQUEST + 12);
-		PPCDumpWords("code calling PPCHalt", read32(PPC_FLUSH_REQUEST + 8), 16, 8);
+		u32 hsp = read32(PPC_HALT_RECORD + 8);
+		PPCDumpWords("code calling PPCHalt", read32(PPC_HALT_RECORD + 4), 16, 8);
 		PPCDumpWords("stack at PPCHalt", hsp, 0, 0x40);
 		PPCDumpReturns(hsp, hsp + 0x1000);
 		PPCDumpText(hsp - 0x400, hsp + 0x1000);
 	}
+	PPCDumpPatchChanges();
 	PPCDumpWords("low memory", 0x80000000, 0, 64);
 	PPCDumpWords("DSI vector", 0x80000300, 0, 16);
 	u32 i, cur = PPCRead32(0x800000D4), thread = PPCRead32(0x800000E4);
