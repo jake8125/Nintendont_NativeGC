@@ -883,11 +883,7 @@ u32 DIReadThread(void *arg)
 						Patch31A0Backup = read32((u32)di_src + pos31A0);
 					}
 					// never copy past the end of the request
-					u32 CopyLength = Length > di_length - Offset ? di_length - Offset : Length;
-					memcpy( di_dest + Offset, di_src, CopyLength );
-					// flush each piece: the next ISORead may block, and nothing
-					// else may see unflushed game data in the meantime
-					sync_after_write( di_dest + Offset, CopyLength );
+					memcpy( di_dest + Offset, di_src, Length > di_length - Offset ? di_length - Offset : Length );
 				}
 				XferLogAdd('D', (u32)di_dest, di_length);
 				if(di_msg->ioctl.command == 0)

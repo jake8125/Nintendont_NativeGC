@@ -55,6 +55,7 @@ extern vu16 SOCurrentTotalFDs;
 
 #define PRS_DOL     0x131C0000
 #define PRS_EXTRACT 0x131C0020
+#define BOX_HEAP_CHECK_PTR 0x130031C4 // called by PADReadGC when set
 
 #define PATCH_STATE_NONE  0
 #define PATCH_STATE_LOAD  1
@@ -1500,6 +1501,9 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 
 	/* Have gc patches loaded at the same place for reloading games */
 	POffset = PATCH_OFFSET_ENTRY;
+	/* Pokemon Box heap watch, set below when wanted */
+	write32(BOX_HEAP_CHECK_PTR, 0);
+	sync_after_write((void*)BOX_HEAP_CHECK_PTR, 0x20);
 
 	/* Most important patch, needed for every game read activity */
 	u32 __DVDInterruptHandlerAddr = PatchCopy(__DVDInterruptHandler, __DVDInterruptHandler_size);
@@ -4148,6 +4152,14 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 			write32(0x87C70, 0x3CDFA0F0);
 			
 			dbgprintf("Patch:Patched Pokemon Box NTSC-U\r\n");
+
+			// Diagnostics for the List freeze: PADReadGC runs this heap
+			// check on the game CPU, BoxHeapReport in main.c logs the result
+			if(ConfigGetConfig(NIN_CFG_LOG))
+			{
+				write32(BOX_HEAP_CHECK_PTR, 0x80000000 | PatchCopy(BoxHeapCheck, BoxHeapCheck_size));
+				sync_after_write((void*)BOX_HEAP_CHECK_PTR, 0x20);
+			}
 		}
 		else if(write32A(0x87148, 0x3C60A000, 0x3C609000, 0))
 		{

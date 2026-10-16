@@ -80,9 +80,7 @@ static u32 PPCRead32(u32 addr)
 		return 0xDEADBEEF;
 	addr &= 0x01FFFFFF;
 	sync_before_read((void*)(addr & ~0x1F), 0x20);
-	u32 val = read32(addr);
-	sync_before_read((void*)(addr & ~0x1F), 0x20); //leave nothing cached
-	return val;
+	return read32(addr);
 }
 
 static void PPCDumpWords(const char *name, u32 addr, u32 before, u32 after)
@@ -325,102 +323,45 @@ static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince, u32 now)
 }
 
 /*
- * Pokemon Box heap watch: walk the main JKRExpHeap's used list ~10 times a
- * second and report the first block header that is broken on two checks in
- * a row (so a block the game is just updating is not reported), together
- * with the transfers that could have written it.
+ * Pokemon Box heap watch. The kernel cannot check the game's heap itself:
+ * the game CPU's data cache is write-back, so main memory can hold stale
+ * headers for a long time. PADReadGC walks the heap on the game CPU instead
+ * and leaves its result here; this logs it with the transfers that could
+ * have written the broken header.
  */
-/*
- * Read a 16 byte heap block header while the game runs, leaving nothing in
- * the kernel's data cache: invalidate, read, invalidate again. A cached copy
- * left behind could later be written back over newer game data. (The disc
- * thread flushes each piece it copies, so no unflushed game data is lost.)
- */
-static bool HeapReadHeader(u32 b, u32 *magic, u32 *size, u32 *next)
+#define BOX_HEAP_REPORT 0x13154100
+static void BoxHeapReport(void)
 {
-	if (b < 0x80000000 || (b & 0x7FFFFFFF) >= 0x017FFFF0 || (b & 3))
-		return false;
-	u32 p = b & 0x01FFFFFF, line = p & ~0x1F;
-	sync_before_read((void*)line, 0x40);
-	*magic = read32(p);
-	*size = read32(p + 4);
-	*next = read32(p + 12);
-	sync_before_read((void*)line, 0x40);
-	return true;
-}
-
-static void HeapCheck(void)
-{
-	static u32 timer = 0, lastGood = 0, arLastGood = 0, suspect = 0, seen = 0, done = 0, announced = 0;
-	const u32 heap = 0x8057D4B0;
+	static u32 timer = 0, lastCount = 0, lastGood = 0, arLastGood = 0, done = 0;
 	if (done || read32(0) != 0x47505845 || !ConfigGetConfig(NIN_CFG_LOG))
 		return;
-	if (timer && TimerDiffTicks(timer) < 949218) //~0.5s
+	if (timer && TimerDiffTicks(timer) < 18982) //~10ms
 		return;
 	timer = read32(HW_TIMER);
-	u32 vtable, start, end, b, prev = 0, n = 0, bad = 0;
-	if (!HeapReadHeader(heap, &vtable, &start, &end) || vtable != 0x801EB0E0) //heap not created yet
-		return;
-	/* Only walk the heap while nobody holds its OSMutex (+0x18, owner thread at
-	   +0x20), so a half-finished alloc or free is never mistaken for damage. */
-	u32 unused, lockOwner;
-	HeapReadHeader(heap + 0x14, &unused, &unused, &lockOwner); //third word read is +0x20
-	if (lockOwner != 0)
-		return;
-	HeapReadHeader(heap + 0x30, &start, &end, &b); //+0x30 start, +0x34 end
-	HeapReadHeader(heap + 0x74, &b, &b, &b);        //+0x80 used list head
-	u32 tail;
-	HeapReadHeader(heap + 0x78, &tail, &tail, &tail); //+0x84 used list tail
-
-	if (!announced)
+	sync_before_read((void*)BOX_HEAP_REPORT, 0x80);
+	u32 count = read32(BOX_HEAP_REPORT);
+	if (count != lastCount)
 	{
-		/* start the ARAM request log from zero */
-		memset32((void*)AR_DMA_LOG, 0, 0x4020);
-		sync_after_write((void*)AR_DMA_LOG, 0x4020);
-		dbgprintf("HeapCheck:watching heap %08X (%08X-%08X)\r\n", heap, start, end);
-		announced = 1;
-	}
-	while (b != 0 && n < 8000)
-	{
-		u32 magic, size, next;
-		if (b < start || b >= end || !HeapReadHeader(b, &magic, &size, &next) ||
-			(magic >> 16) != 0x484D || size > end - b)
-		{
-			bad = b;
-			break;
-		}
-		prev = b;
-		n++;
-		/* the last used block's next is not cleared in this JSystem, the
-		   list ends at the tail the heap records */
-		if (b == tail)
-			break;
-		b = next;
-	}
-	if (!bad)
-	{
-		suspect = 0;
+		if (lastCount == 0)
+			dbgprintf("HeapCheck:game CPU is checking heap 8057D4B0\r\n");
+		lastCount = count;
 		lastGood = timer;
 		sync_before_read((void*)AR_DMA_LOG, 0x20);
 		arLastGood = read32(AR_DMA_LOG);
-		return;
 	}
-	if (bad != suspect) //first sighting, confirm on the next checks
-	{
-		suspect = bad;
-		seen = 1;
-		return;
-	}
-	if (++seen < 3)
+	if (read32(BOX_HEAP_REPORT + 4) == 0)
 		return;
 	done = 1;
-	u32 now = read32(HW_TIMER);
-	dbgprintf("HeapCheck:broken block %08X after %u good blocks, previous %08X, tail %08X, last good check %u ms ago\r\n",
-		bad, n, prev, tail, TimerDiffTicks(lastGood) / 1898);
-	if (prev)
-		PPCDumpWords("previous block", prev, 0, 8);
-	PPCDumpWords("around broken block", bad, 8, 8);
-	XferLogReport((bad & 0x01FFFFFF) - 0x200, (bad & 0x01FFFFFF) + 0x20, lastGood, arLastGood, now);
+	u32 i, bad = read32(BOX_HEAP_REPORT + 8), prev = read32(BOX_HEAP_REPORT + 0xC);
+	dbgprintf("HeapCheck:%s list broken at %08X, block %u, previous %08X, tail %08X, after %u good checks, last %u ms ago\r\n",
+		read32(BOX_HEAP_REPORT + 0x18) == 0x80 ? "used" : "free", bad, 0x10000 - read32(BOX_HEAP_REPORT + 0x10), prev,
+		read32(BOX_HEAP_REPORT + 0x14), count, TimerDiffTicks(lastGood) / 1898);
+	/* as the game CPU saw them: 0x20 bytes at the previous block, 0x40 around the broken one */
+	for (i = 0x20; i < 0x80; i += 0x10)
+		dbgprintf("HeapCheck: %08X: %08X %08X %08X %08X\r\n", (i < 0x40 ? prev - 0x20 : bad - 0x60) + i,
+			read32(BOX_HEAP_REPORT + i), read32(BOX_HEAP_REPORT + i + 4),
+			read32(BOX_HEAP_REPORT + i + 8), read32(BOX_HEAP_REPORT + i + 12));
+	XferLogReport((bad & 0x01FFFFFF) - 0x200, (bad & 0x01FFFFFF) + 0x20, lastGood, arLastGood, read32(HW_TIMER));
 }
 
 /*
@@ -456,9 +397,15 @@ static void PPCDumpState(void)
 		PPCDumpText(0x80000000 | DOLMaxOff, (0x80000000 | DOLMaxOff) + 0x20000);
 	if (stackBase != 0xDEADBEEF && stackBase > sp && stackBase - sp < 0x10000)
 		PPCDumpText(sp - 0x1000, stackBase);
-	/* Pokemon Box: its JKRExpHeap seen in the List hang */
+	/* Pokemon Box: its JKRExpHeap seen in the List hang. This is main memory
+	   as the kernel sees it, which can miss the game CPU's cached writes. */
 	if (read32(0) == 0x47505845)
+	{
+		sync_before_read((void*)BOX_HEAP_REPORT, 0x20);
+		dbgprintf("HeapCheck:%u clean checks by the game CPU, found %u\r\n",
+			read32(BOX_HEAP_REPORT), read32(BOX_HEAP_REPORT + 4));
 		PPCDumpHeaps(0x8057D4B0);
+	}
 	/* Nintendont's fake interrupt flags (RSW, DI, SI, EXI, HSP), pending if non-zero */
 	sync_before_read((void*)INT_BASE, 0xA0);
 	for (i = 0; i < 0xA0; i += 0x20)
@@ -626,6 +573,12 @@ int _main( int argc, char *argv[] )
 	sync_after_write((void*)0x13003100, 0x30);
 	memset32((void*)0x13160000, 0, 0x20);
 	sync_after_write((void*)0x13160000, 0x20);
+	/* Pokemon Box heap watch: no check routine until DoPatches places one */
+	write32(0x130031C4, 0);
+	sync_after_write((void*)0x130031C0, 0x20);
+	/* ARAM request log and Pokemon Box heap report, see BoxHeapReport */
+	memset32((void*)AR_DMA_LOG, 0, 0x4200);
+	sync_after_write((void*)AR_DMA_LOG, 0x4200);
 
 	memset32((void*)0x13026500, 0, 0x100);
 	sync_after_write((void*)0x13026500, 0x100);
@@ -846,7 +799,7 @@ int _main( int argc, char *argv[] )
 		}
 		StreamUpdateRegisters();
 		CheckOSReport();
-		HeapCheck();
+		BoxHeapReport();
 		if(GCNCard_CheckChanges())
 		{
 			Now = read32(HW_TIMER);
