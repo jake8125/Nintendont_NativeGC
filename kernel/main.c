@@ -80,7 +80,9 @@ static u32 PPCRead32(u32 addr)
 		return 0xDEADBEEF;
 	addr &= 0x01FFFFFF;
 	sync_before_read((void*)(addr & ~0x1F), 0x20);
-	return read32(addr);
+	u32 val = read32(addr);
+	sync_before_read((void*)(addr & ~0x1F), 0x20); //leave nothing cached
+	return val;
 }
 
 static void PPCDumpWords(const char *name, u32 addr, u32 before, u32 after)
@@ -329,21 +331,21 @@ static void XferLogReport(u32 lo, u32 hi, u32 since, u32 arSince, u32 now)
  * with the transfers that could have written it.
  */
 /*
- * Read a 16 byte heap block header while the game runs. Write the lines back
- * before invalidating them: the disc thread may still hold unflushed data
- * there (it only flushes after its whole copy), and a plain invalidate would
- * throw that away.
+ * Read a 16 byte heap block header while the game runs, leaving nothing in
+ * the kernel's data cache: invalidate, read, invalidate again. A cached copy
+ * left behind could later be written back over newer game data. (The disc
+ * thread flushes each piece it copies, so no unflushed game data is lost.)
  */
 static bool HeapReadHeader(u32 b, u32 *magic, u32 *size, u32 *next)
 {
 	if (b < 0x80000000 || (b & 0x7FFFFFFF) >= 0x017FFFF0 || (b & 3))
 		return false;
 	u32 p = b & 0x01FFFFFF, line = p & ~0x1F;
-	sync_after_write((void*)line, 0x40);
 	sync_before_read((void*)line, 0x40);
 	*magic = read32(p);
 	*size = read32(p + 4);
 	*next = read32(p + 12);
+	sync_before_read((void*)line, 0x40);
 	return true;
 }
 
@@ -367,6 +369,8 @@ static void HeapCheck(void)
 		return;
 	HeapReadHeader(heap + 0x30, &start, &end, &b); //+0x30 start, +0x34 end
 	HeapReadHeader(heap + 0x74, &b, &b, &b);        //+0x80 used list head
+	u32 tail;
+	HeapReadHeader(heap + 0x78, &tail, &tail, &tail); //+0x84 used list tail
 
 	if (!announced)
 	{
@@ -386,8 +390,12 @@ static void HeapCheck(void)
 			break;
 		}
 		prev = b;
-		b = next;
 		n++;
+		/* the last used block's next is not cleared in this JSystem, the
+		   list ends at the tail the heap records */
+		if (b == tail)
+			break;
+		b = next;
 	}
 	if (!bad)
 	{
@@ -407,8 +415,8 @@ static void HeapCheck(void)
 		return;
 	done = 1;
 	u32 now = read32(HW_TIMER);
-	dbgprintf("HeapCheck:broken block %08X after %u good blocks, previous %08X, last good check %u ms ago\r\n",
-		bad, n, prev, TimerDiffTicks(lastGood) / 1898);
+	dbgprintf("HeapCheck:broken block %08X after %u good blocks, previous %08X, tail %08X, last good check %u ms ago\r\n",
+		bad, n, prev, tail, TimerDiffTicks(lastGood) / 1898);
 	if (prev)
 		PPCDumpWords("previous block", prev, 0, 8);
 	PPCDumpWords("around broken block", bad, 8, 8);
