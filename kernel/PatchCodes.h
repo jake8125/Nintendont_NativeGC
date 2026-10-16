@@ -21,6 +21,7 @@
 #include "asm/__ARHandler.h"
 #include "asm/SITransfer.h"
 #include "asm/SIGetType.h"
+#include "asm/PPCHaltHook.h"
 #include "asm/FakeInterrupt.h"
 #include "asm/FakeInterrupt_DBG.h"
 #include "asm/FakeInterrupt_Datel.h"

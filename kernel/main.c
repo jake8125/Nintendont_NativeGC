@@ -348,6 +348,12 @@ static bool PPCFlushReady(void)
 		return false;
 	}
 	sync_before_read((void*)PPC_FLUSH_REQUEST, 0x20);
+	if (read32(PPC_FLUSH_REQUEST + 4) == 0x48414C54) //'HALT', see PPCHaltHook.S
+	{
+		dbgprintf("PPC:game CPU halted on purpose (PPCHalt called from %08X, sp %08X) and wrote back its data cache, memory below is current\r\n",
+			read32(PPC_FLUSH_REQUEST + 8), read32(PPC_FLUSH_REQUEST + 12));
+		return true;
+	}
 	if (read32(PPC_FLUSH_REQUEST) == 2)
 	{
 		dbgprintf("PPC:game CPU wrote back its data cache after %u ms, memory below is current\r\n",
@@ -369,6 +375,17 @@ static void PPCDumpState(void)
 	if (!ConfigGetConfig(NIN_CFG_LOG))
 		return;
 	dbgprintf("PPC:State at shutdown\r\n");
+	/* Halted through PPCHalt: the halting code's own stack, with its callers
+	   and any panic message on it */
+	sync_before_read((void*)PPC_FLUSH_REQUEST, 0x20);
+	if (read32(PPC_FLUSH_REQUEST + 4) == 0x48414C54)
+	{
+		u32 hsp = read32(PPC_FLUSH_REQUEST + 12);
+		PPCDumpWords("code calling PPCHalt", read32(PPC_FLUSH_REQUEST + 8), 16, 8);
+		PPCDumpWords("stack at PPCHalt", hsp, 0, 0x40);
+		PPCDumpReturns(hsp, hsp + 0x1000);
+		PPCDumpText(hsp - 0x400, hsp + 0x1000);
+	}
 	PPCDumpWords("low memory", 0x80000000, 0, 64);
 	PPCDumpWords("DSI vector", 0x80000300, 0, 16);
 	u32 i, cur = PPCRead32(0x800000D4), thread = PPCRead32(0x800000E4);

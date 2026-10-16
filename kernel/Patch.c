@@ -1511,6 +1511,25 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	/* Datels own timer */
 	u32 DatelTimerAddr = Datel ? PatchCopy(DatelTimer, DatelTimer_size) : 0;
 
+	/* Freeze diagnostics: make PPCHalt (sync, then nop/li r3,0/nop loop)
+	   write the data cache back first, so the dump on power off is current */
+	if (ConfigGetConfig(NIN_CFG_LOG))
+	{
+		for (i = 0; i + 0x14 <= (int)Length; i += 4)
+		{
+			u32 p = (u32)Buffer + i;
+			if (read32(p) == 0x7C0004AC && read32(p + 4) == 0x60000000 && read32(p + 8) == 0x38600000 &&
+				read32(p + 12) == 0x60000000 && read32(p + 16) == 0x4BFFFFF4)
+			{
+				PatchB(PatchCopy(PPCHaltHook, PPCHaltHook_size), p);
+				dbgprintf("Patch:[PPCHalt] hooked (0x%08X)\r\n", p);
+				break;
+			}
+		}
+		if (i + 0x14 > (int)Length)
+			dbgprintf("Patch:[PPCHalt] not found\r\n");
+	}
+
 	TRISetupGames();
 	if(TRIGame == TRI_NONE)
 	{
