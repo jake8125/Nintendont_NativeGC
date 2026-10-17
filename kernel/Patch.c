@@ -518,6 +518,22 @@ static void Patch31A0( void )
 	PatchB(0x31A4, PatchOffset);
 }
 
+/*
+ * Pokemon Box creates a heap in 0x80001800-0x80003000, the memory PatchCopy
+ * puts patches in. Opening "Go to list" fills that heap past the lowest
+ * patch (the __DSPHandler hook), and the next DSP interrupt branches into
+ * game data. The game also clears everything after its dol at startup (bss
+ * and the whole stack), so for Box the patches go near the top of MEM1,
+ * below the FST and bi2 the apploader puts there, and FakeEntryLoad lowers
+ * BootInfo arenaHi so the game's arena ends below them.
+ */
+#define BOX_PATCH_TOP	0x017F0000
+#define BOX_ARENA_HI	0x017EF000
+static bool BoxPatchesHigh(void)
+{
+	return TITLE_ID == 0x475058; // Pokemon Box
+}
+
 u32 PatchCopy(const u8 *PatchPtr, const u32 PatchSize)
 {
 	POffset -= PatchSize;
@@ -1499,7 +1515,7 @@ void DoPatches( char *Buffer, u32 Length, u32 DiscOffset )
 	sync_before_read(Buffer, Length);
 
 	/* Have gc patches loaded at the same place for reloading games */
-	POffset = PATCH_OFFSET_ENTRY;
+	POffset = BoxPatchesHigh() ? BOX_PATCH_TOP : PATCH_OFFSET_ENTRY;
 
 	/* Most important patch, needed for every game read activity */
 	u32 __DVDInterruptHandlerAddr = PatchCopy(__DVDInterruptHandler, __DVDInterruptHandler_size);
@@ -4599,6 +4615,22 @@ void PatchGame()
 	sync_after_write((void*)0x131C0040, 0x20);
 	/* Secure Low Mem */
 	Patch31A0();
+	/* For FakeEntryLoad: extra range to invalidate and arena end, 0 for none */
+	write32(RESET_STATUS + 0xC, 0);
+	write32(RESET_STATUS + 0x10, 0);
+	write32(RESET_STATUS + 0x14, 0);
+	if (BoxPatchesHigh())
+	{
+		u32 PatchStart = POffset & ~0x1F;
+		write32(RESET_STATUS + 0xC, PatchStart | 0x80000000);
+		write32(RESET_STATUS + 0x10, (BOX_PATCH_TOP - PatchStart) >> 5);
+		write32(RESET_STATUS + 0x14, BOX_ARENA_HI | 0x80000000);
+		sync_after_write((void*)PatchStart, BOX_PATCH_TOP - PatchStart);
+		dbgprintf("Patch:Pokemon Box, patches at 0x%08X-0x%08X, game memory ends at 0x%08X\r\n",
+			POffset | 0x80000000, BOX_PATCH_TOP | 0x80000000, BOX_ARENA_HI | 0x80000000);
+		if (POffset < BOX_ARENA_HI)
+			dbgprintf("Patch:WARNING Pokemon Box patches run below the game's memory end\r\n");
+	}
 	write32( FLUSH_LEN, FullLength >> 5 );
 	u32 Command2 = DOLMinOff;
 	// ToDo.  HACK: Why doesn't Nightfire Deep Descent level like this??
